@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import shlex
 import shutil
 import sqlite3
@@ -14,6 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
+from outcomes import CallFailure, failure_kind
 from providers import AGENTS, MODEL_SEATS, binary, invoke, check_claude
 from research import research_copy
 from record_store import discussion_folder, reconcile
@@ -22,6 +22,7 @@ from projects import (DEFAULT, MODEL_HELP, PROJECT_HELP, claude_access, data_dir
                       project_command, project_row, setup, workspace)
 
 LABEL = {"stopped":"已停止", "active": "讨论中", "chat": "已回复", "consensus": "已达成共识", "disputed": "有分歧",
+         "summarizing": "正在撰写总结", "closed": "已结束 · 保留分歧",
          "incomplete": "未完成", "implementing": "执行中", "returned": "执行已返回", "inspect": "执行中断，需核对项目",
          "probe": "探测完成"}
 GUIDE = ("你参与一场中文讨论。按需搜索一手资料、阅读当前目录、运行测试或做最小实验。注明来源、命令、观测值与局限。仅在当前实验目录写入，不启动其他模型 CLI。"
@@ -74,11 +75,11 @@ def database():
     setup(db)
     # A killed coordinator cannot complete outstanding calls. Never replay a write.
     recovered = set()
-    for row in db.execute("SELECT id,project,state,owner FROM sessions WHERE state IN ('active','implementing')").fetchall():
+    for row in db.execute("SELECT id,project,state,owner FROM sessions WHERE state IN ('active','implementing','summarizing')").fetchall():
         if not process_alive(row["owner"]):
-            state = "inspect" if row["state"] == "implementing" else "incomplete"
-            if db.execute("UPDATE sessions SET state=? WHERE id=? AND state=? AND owner IS ?",
-                          (state, row["id"], row["state"], row["owner"])).rowcount:
+            state = {"implementing":"inspect", "summarizing":"closed"}.get(row["state"],"incomplete")
+            if db.execute("UPDATE sessions SET state=?,stop_requested=CASE WHEN ?='closed' THEN 0 ELSE stop_requested END WHERE id=? AND state=? AND owner IS ?",
+                          (state, state, row["id"], row["state"], row["owner"])).rowcount:
                 recovered.add((row["id"],row["project"]))
                 db.execute("UPDATE calls SET ended=?,error='进程已中断' WHERE session=? AND ended IS NULL AND owner IS NULL",
                            (time.time(), row["id"]))
@@ -150,7 +151,7 @@ def session_usage(db, sid):
 
 def request_stop(db, sid, project):
     changed = db.execute("""UPDATE sessions SET stop_requested=1 WHERE id=? AND project=?
-                         AND trash_root IS NULL AND state IN ('active','implementing')""", (sid, project)).rowcount
+                         AND trash_root IS NULL AND state IN ('active','implementing','summarizing')""", (sid, project)).rowcount
     if not changed:
         raise ValueError("这轮已经结束或不存在")
 
@@ -158,7 +159,8 @@ def request_stop(db, sid, project):
 def finish(db, sid, state):
     db.execute("BEGIN IMMEDIATE")
     try:
-        db.execute("UPDATE sessions SET state=CASE WHEN stop_requested=1 THEN 'stopped' ELSE ? END WHERE id=?", (state,sid))
+        db.execute("""UPDATE sessions SET state=CASE WHEN stop_requested=1 AND ?!='closed' THEN 'stopped' ELSE ? END,
+                      stop_requested=CASE WHEN ?='closed' THEN 0 ELSE stop_requested END WHERE id=?""", (state,state,state,sid))
         state, project = db.execute("SELECT state,project FROM sessions WHERE id=?", (sid,)).fetchone()
         db.commit()
     except BaseException:
@@ -202,27 +204,20 @@ async def call(db, sid, stage, agent, prompt, selected_model, workspace=None, ba
         return None
     cid = created.lastrowid
     if stopping():
-        db.execute("UPDATE calls SET ended=?,error='讨论已停止' WHERE id=?", (time.time(),cid))
+        db.execute("UPDATE calls SET ended=?,error='讨论已停止',failure_kind='interrupted' WHERE id=?", (time.time(),cid))
         return None
     print(f"  · {stage}  {agent} · {selected_model or 'CLI 默认'} …", flush=True)
     def preview(text):
         db.execute("UPDATE calls SET reply=? WHERE id=?", (text, cid))
 
-    def auto_lab():
-        return bool(db.execute("""SELECT p.gemini_auto_lab FROM projects p JOIN sessions s ON p.name=s.project
-                                  WHERE s.id=?""", (sid,)).fetchone()[0])
-    async def permission(tool, can_allow, isolated=False):
+    async def permission(tool, can_allow):
         # Preserve the vendor's exact command, diff, or path for inspection before deciding.
         details = {k: tool[k] for k in ("title", "kind", "rawInput", "args", "locations", "content") if tool.get(k)}
         details["cwd"] = str(workspace)
         can_allow = can_allow and any(details.get(k) for k in ("rawInput", "args", "locations", "content"))
-        if isolated and can_allow and auto_lab() and not stopping():
-            db.execute("INSERT INTO tool_permissions(call_id,details,can_allow,decision) VALUES(?,?,1,'auto')",
-                       (cid, json.dumps(details, ensure_ascii=False)))
-            return True
         pid = db.execute("INSERT INTO tool_permissions(call_id,details,can_allow) VALUES(?,?,?)",
                          (cid, json.dumps(details, ensure_ascii=False), int(can_allow))).lastrowid
-        print(f"  · {stage} Gemini 正等待网页确认 · {sid} · {tool.get('title') or '工具'}", flush=True)
+        print(f"  · {stage} {agent} 正等待网页确认 · {sid} · {tool.get('title') or '工具'}", flush=True)
         try:
             while True:
                 decision = db.execute("SELECT decision FROM tool_permissions WHERE id=?", (pid,)).fetchone()[0]
@@ -232,12 +227,12 @@ async def call(db, sid, stage, agent, prompt, selected_model, workspace=None, ba
         finally:
             db.execute("UPDATE tool_permissions SET decision='expired' WHERE id=? AND decision='pending'", (pid,))
 
+    minutes = preferences["call_minutes"]
     job = asyncio.create_task(invoke(agent, prompt, workspace=workspace, ballot=ballot,
                                      selected_model=selected_model, on_text=preview, effort=effort, schema=schema, probe=stage=="连接测试" or not use_tools,
-                                     implementing=stage in ("实施", "集成复核"), reviewing=stage=="集成复核",
-                                     isolated_lab=agent=="gemini" and auto_lab() and stage not in ("实施", "集成复核", "连接测试"),
+                                     reviewing=stage=="集成复核",
                                      check_access=claude_access(db, project) if agent=="claude" else None,
-                                     timeout_seconds=(preferences["call_minutes"] or 0)*60 or None, gemini_mode=preferences["gemini_mode"],
+                                     timeout_seconds=minutes*60 if minutes else None, tool_mode=preferences["tool_mode"],
                                      on_permission=permission, on_tool=lambda title: preview("正在使用工具 · " + title)))
     try:
         while not job.done():
@@ -248,11 +243,15 @@ async def call(db, sid, stage, agent, prompt, selected_model, workspace=None, ba
         reply, usage = await job
     except (OSError, ValueError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
         error = str(exc) or ("调用超时" if isinstance(exc, asyncio.TimeoutError) else "已中断")
-        if re.search(r"rate.limit|resource.exhausted|usage limit|quota.exceeded|额度耗尽|\b429\b", error, re.I):
-            error = "额度或频率受限 · " + error
-        elif re.search(r"content.filter|safety.block|blocked.by.safety|stopReason.*refusal|未完成本轮：refusal", error, re.I):
-            error = "服务方内容安全限制 · " + error
-        db.execute("UPDATE calls SET ended=?,error=? WHERE id=?", (time.time(), error, cid))
+        if isinstance(exc, CallFailure):
+            kind = exc.kind
+        elif isinstance(exc, asyncio.TimeoutError):
+            kind = "timeout"
+        elif isinstance(exc, asyncio.CancelledError):
+            kind = "interrupted"
+        else:
+            kind = failure_kind(error)
+        db.execute("UPDATE calls SET ended=?,error=?,failure_kind=? WHERE id=?", (time.time(), error, kind, cid))
         print(f"  × {stage}  {agent}  {error}", flush=True)
         if not job.done():
             job.cancel()
@@ -267,6 +266,38 @@ async def call(db, sid, stage, agent, prompt, selected_model, workspace=None, ba
 
 def bundle(items):
     return json.dumps(items, ensure_ascii=False, indent=2)
+
+
+def discussion_summary(db, sid):
+    return db.execute("""SELECT reply FROM calls WHERE session=? AND stage='讨论总结'
+                         AND ended IS NOT NULL AND error IS NULL ORDER BY id DESC LIMIT 1""", (sid,)).fetchone()
+
+
+async def close_discussion(db, sid, project):
+    row = session(db, sid, project)
+    if row["state"] not in ("disputed", "closed") or discussion_summary(db, sid):
+        raise ValueError("只有仍有分歧且尚未完成总结的讨论可执行此操作")
+    if not db.execute("""UPDATE sessions SET state='summarizing',owner=?,failure=NULL WHERE id=? AND state=?
+                          AND stop_requested=0""", (os.getpid(), sid, row["state"])).rowcount:
+        raise ValueError("讨论正在由另一请求处理")
+    try:
+        calls = db.execute("""SELECT stage,agent,reply FROM calls WHERE session=? AND ended IS NOT NULL AND error IS NULL
+                              AND stage!='讨论总结' ORDER BY id""", (sid,))
+        evidence = "\n\n".join(f"{stage} · {agent}\n{reply}" for stage, agent, reply in calls if reply)
+        prompt = ("请为用户写一份中文讨论总结。本轮结束时未达成共识。用明确的段落列出已对齐的判断、"
+                  "仍有异议及各席的理由、可核查的证据、可用于今后继续讨论的验证问题。"
+                  "准确引用最后表决，保留关键条件。候选方案、拟议实验及分工仍是讨论材料，"
+                  "不得描述为已获同意或已授权实施。只用给定材料，直接交付 Markdown 总结。"
+                  "\n\n议题\n" + row["topic"] + "\n\n最后候选方案\n" + row["plan"] +
+                  "\n\n逐轮材料\n" + evidence[-48000:])
+        model = json.loads(row["settings"] or "{}").get("models", {}).get("gemini")
+        with tempfile.TemporaryDirectory(prefix="roundtable-summary-") as folder:
+            reply = await call(db, sid, "讨论总结", "gemini", prompt, model, workspace=Path(folder), use_tools=False)
+        if reply is None:
+            db.execute("UPDATE sessions SET failure=? WHERE id=?", ("讨论已结束。Gemini 总结可重试。", sid))
+    finally:
+        finish(db, sid, "closed")
+    return sid
 
 
 def plan_schema(seats):
@@ -399,14 +430,18 @@ def moderator_for(db, sid, models):
     return chosen if chosen in models else ("claude" if "claude" in models else "codex")
 
 
-def prepare_topic(db, topic, parent, project, moderator="", mode="both"):
+def prepare_topic(db, topic, parent, project, moderator="", mode="both", rounds=None):
     if not topic.strip():
         raise ValueError("议题不能为空")
     row = project_row(db, project)
     models = models_for(row)
     if moderator and moderator not in models:
         raise ValueError("请选择已启用的席位担任主持人")
-    settings = dict(models=models, moderator=moderator, mode=mode, efforts={a: row[a+"_effort"] for a in ("codex","claude")}, source=str(workspace(row) or ""))
+    versions = row["plan_versions"] if rounds is None else rounds
+    if versions not in (1, 2, 3):
+        raise ValueError("请选择 1–3 版候选方案")
+    settings = dict(models=models, moderator=moderator, mode=mode, plan_versions=versions,
+                    efforts={a: row[a+"_effort"] for a in ("codex","claude")}, source=str(workspace(row) or ""))
     past = history(db, parent, project)
     context = f"既往对话：\n{past}\n\n本轮用户原话：\n{topic}" if past else topic
     sid = uuid.uuid4().hex[:12]
@@ -422,12 +457,12 @@ def prepare_topic(db, topic, parent, project, moderator="", mode="both"):
     return sid, context, models
 
 
-async def begin(db, topic, parent=None, agent=None, rounds=2, probe=False, project=DEFAULT, moderator=""):
-    sid, context, models = prepare_topic(db, topic, parent, project, moderator, "probe" if probe else agent or "both")
+async def begin(db, topic, parent=None, agent=None, rounds=None, probe=False, project=DEFAULT, moderator=""):
+    sid, context, models = prepare_topic(db, topic, parent, project, moderator, "probe" if probe else agent or "both", rounds)
     return await run_topic(db, sid, context, models, agent, rounds, probe)
 
 
-async def resume_discussion(db, sid, project, rounds=2):
+async def resume_discussion(db, sid, project, rounds=None):
     row = session(db, sid, project)
     settings = json.loads(row["settings"] or "{}")
     models = settings.get("models") or {}
@@ -448,11 +483,13 @@ async def resume_discussion(db, sid, project, rounds=2):
     elif (single == "claude" or not single and "claude" in models) and not project_row(db, project)["claude_enabled"]:
         raise ValueError("请先为此项目启用原讨论的 Claude 席位")
     last_version = max((int(s[4:]) for s in stages if s.startswith("表决 v") and s[4:].isdigit()), default=0)
-    rounds = max(rounds, last_version + (row["state"] == "disputed"))
+    rounds = max(rounds if rounds is not None else settings.get("plan_versions",2),
+                 last_version + (row["state"] == "disputed"))
+    settings["plan_versions"] = rounds
     past = history(db, row["parent"], project)
     context = ("既往对话：\n" + past + "\n\n本轮用户原话：\n" if past else "") + row["topic"]
-    if not db.execute("UPDATE sessions SET state='active',owner=?,failure=NULL WHERE id=? AND state=? AND stop_requested=0",
-                      (os.getpid(),sid,row["state"])).rowcount:
+    if not db.execute("UPDATE sessions SET state='active',owner=?,failure=NULL,settings=? WHERE id=? AND state=? AND stop_requested=0",
+                      (os.getpid(),json.dumps(settings),sid,row["state"])).rowcount:
         raise ValueError("讨论已被其他进程接手，或已要求停止")
     if drafting_only:
         votes = dict(db.execute("SELECT agent,reply FROM calls WHERE session=? AND stage=? AND error IS NULL AND ended IS NOT NULL ORDER BY id",
@@ -474,6 +511,8 @@ async def run_topic(db, sid, context, models, agent, rounds, probe, require_all=
         if any(a not in models for a in seats):
             raise ValueError("请先在此项目启用对应席位")
         settings = json.loads(db.execute("SELECT settings FROM sessions WHERE id=?", (sid,)).fetchone()[0])
+        if rounds is None:
+            rounds = settings.get("plan_versions",2)
         if "claude" in seats:
             try:
                 await asyncio.to_thread(check_claude)
@@ -523,6 +562,8 @@ REPORT_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["
 
 async def implement(db, sid, destination=None, project=DEFAULT):
     row = session(db, sid, project)
+    if row["state"] != "consensus":
+        raise ValueError(f"当前状态为「{LABEL[row['state']]}」。实施需要全席共识。")
     settings = project_row(db, project)
     target = Path(destination).expanduser().resolve() if destination else workspace(settings)
     if target is None or not target.is_dir():
@@ -715,6 +756,9 @@ def persist_record(db, sid, project):
         text = transcript(db, sid, project)
         row = session(db, sid, project)
         write_text(folder / "讨论记录.md", text)
+        summary = discussion_summary(db, sid)
+        if summary:
+            write_text(folder / "讨论总结.md", summary["reply"] + "\n")
         if row["plan"]:
             final = db.execute("""SELECT reply FROM calls WHERE session=? AND stage='最终方案撰写'
                                   AND ended IS NOT NULL AND error IS NULL ORDER BY id DESC LIMIT 1""", (sid,)).fetchone()
@@ -800,18 +844,19 @@ def main():
             q.add_argument("agent", choices=(*AGENTS, "claude"))
         else:
             q.add_argument("--moderator", choices=MODEL_SEATS, help="主持候选方案及修订")
-            q.add_argument("--rounds", type=int, choices=(1, 2, 3), default=2, help="最多表决几版方案")
+            q.add_argument("--rounds", type=int, choices=(1, 2, 3), help="最多表决几版方案，留空使用项目设置")
         q.add_argument("topic", help="议题文本，用 - 从标准输入读取")
         q.add_argument("--after", metavar="ID", help="接续已有对话")
     sub.add_parser("list", help="最近的讨论记录")
     sub.add_parser("show", help="查看逐轮记录与 token").add_argument("id")
     sub.add_parser("export", help="向标准输出导出本轮 Markdown 记录").add_argument("id")
+    sub.add_parser("close", help="保留分歧并请 Gemini 撰写讨论总结").add_argument("id")
     pdf = sub.add_parser("pdf", help="请 Gemini 将定稿排版为图文 PDF")
     pdf.add_argument("id")
     pdf.add_argument("--evidence", help="可选的文献数据文本，供 Gemini 制图时引用")
     resume = sub.add_parser("resume", help="沿用已返回的发言，从中断的讨论阶段续跑")
     resume.add_argument("id")
-    resume.add_argument("--rounds", type=int, choices=(1, 2, 3), default=2, help="本轮最多审议的版本数")
+    resume.add_argument("--rounds", type=int, choices=(1, 2, 3), help="本轮最多审议的版本数，留空沿用原讨论")
     run = sub.add_parser("implement", help="按已达成共识的分工实施")
     run.add_argument("id")
     run.add_argument("--workspace", help="本次实施目录，默认使用项目绑定的目录")
@@ -838,13 +883,16 @@ def main():
             print("已请求停止，已收到的发言保留在讨论记录中。")
         elif args.cmd == "export":
             print(transcript(db, args.id, project), end="")
+        elif args.cmd == "close":
+            asyncio.run(close_discussion(db, args.id, project))
+            return int(not discussion_summary(db, args.id))
         elif args.cmd == "pdf":
             from reports import export_pdf
             print(asyncio.run(export_pdf(db, args.id, project, args.evidence)))
         elif args.cmd == "resume":
             asyncio.run(resume_discussion(db, args.id, project, args.rounds))
             row = session(db, args.id, project)
-            return 2 if row["state"] == "disputed" else int(row["state"] != "consensus" or bool(row["failure"]))
+            return 2 if row["state"] == "disputed" else int(row["state"] not in ("consensus","chat") or bool(row["failure"]))
         elif args.cmd == "quota":
             from quotas import read_quota
             if args.agent not in models_for(project_row(db, project)):
@@ -864,7 +912,7 @@ def main():
             return int(asyncio.run(implement(db, args.id, args.workspace, project)) != "returned")
         else:
             topic = sys.stdin.read().strip() if args.topic == "-" else args.topic
-            sid = asyncio.run(begin(db, topic, args.after, getattr(args, "agent", None), getattr(args, "rounds", 2), project=project, moderator=getattr(args, "moderator", None) or ""))
+            sid = asyncio.run(begin(db, topic, args.after, getattr(args, "agent", None), getattr(args, "rounds", None), project=project, moderator=getattr(args, "moderator", None) or ""))
             row = session(db, sid, project)
             return 2 if row["state"] == "disputed" else int(row["state"] in ("incomplete","stopped") or bool(row["failure"]))
         return 0

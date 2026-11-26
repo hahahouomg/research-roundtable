@@ -103,6 +103,22 @@ class BrowserAPITests(unittest.TestCase):
             worker.assert_not_called()
         self.assertEqual(json.loads(self.request("/api/state")[1])["sessions"], [])
 
+    def test_runtime_preferences_and_round_cap_are_project_scoped(self):
+        with patch.dict(os.environ, ROUNDTABLE_TIMEOUT="1200"):
+            default = json.loads(self.request("/api/state")[1])
+        self.assertEqual((default["default_timeout_seconds"],default["plan_versions"]), (1200,2))
+        prefs = {"tool_mode":"auto", "minutes":"24", "plan_versions":"3"}
+        self.assertEqual(self.request("/api/preferences", body=prefs)[0], 200)
+        self.assertEqual(self.request("/api/preferences", body={**prefs,"plan_versions":"4"})[0], 400)
+        current = json.loads(self.request("/api/state")[1])
+        self.assertEqual((current["tool_mode"],current["call_minutes"],current["plan_versions"]), ("auto",24,3))
+        with patch("local_ui.start_worker") as worker:
+            code, raw = self.request("/api/start", body={"topic":"round limit","mode":"both"})
+        self.assertEqual(code,200)
+        self.assertIsNone(worker.call_args.args[-2])
+        record = json.loads(self.request("/api/state?session="+json.loads(raw)["session"])[1])["selected"]
+        self.assertEqual(record["plan_versions"],3)
+
     def test_native_picker_handles_selected_cancelled_and_headless(self):
         path = Path(os.environ["ROUNDTABLE_HOME"]) / "中文 ' 工作区"
         path.mkdir()

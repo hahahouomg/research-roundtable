@@ -94,9 +94,10 @@ class AcpProtocolTests(unittest.IsolatedAsyncioTestCase):
             settings.parent.mkdir(parents=True)
             available = {"default", "auto", "accept-edits"}
             settings.write_text('{"toolPermission":"proceed-in-sandbox"}')
-            self.assertEqual(execution_mode(available, False), "default")
+            self.assertEqual(execution_mode(available), "default")
+            self.assertEqual(execution_mode(available,"cli","accept-edits"),"accept-edits")
             settings.write_text('{"toolPermission":"request-review"}')
-            self.assertEqual(execution_mode(available, True), "default")
+            self.assertEqual(execution_mode(available), "default")
 
     @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
     async def test_sandbox_model_auto_and_allow_once_resume_same_prompt(self):
@@ -143,22 +144,3 @@ event(id=msg['id'],result={'stopReason':'end_turn','usage':{'totalTokens':10}})
                 result, usage = await run(str(exe), root, "test", "gemini-4-neon-xhigh", None, 1,
                                           root / "log", None, decide, None)
             self.assertEqual((result, usage), ("verified", {"total": 10}))
-
-
-class IsolatedCommandTests(unittest.TestCase):
-    def test_only_the_exact_isolated_script_call_can_run_automatically(self):
-        from isolated_experiment import matches
-        prefix, folder = "/usr/bin/bwrap --unshare-all --bind /tmp/lab /work --", Path("/tmp/lab")
-        command = prefix + " python3 讨论实验/check.py"
-        def tool(value, **extra):
-            return {"name": "run_command", "kind": "execute", "rawInput": {"CommandLine": value, **extra}}
-        self.assertTrue(matches(tool(command), prefix, folder))
-        self.assertFalse(matches({**tool(command), "name": "third_party"}, prefix, folder))
-        self.assertFalse(matches({**tool(command), "args":{"CommandLine":"other"}}, prefix, folder))
-        for value in ("python3 讨论实验/check.py", command+" && pwd", command+" > outside",
-                      command+' "$(pwd)"', command+"\nls", prefix+" sh -c whoami",
-                      command.replace("--unshare-all","--share-net")):
-            self.assertFalse(matches(tool(value), prefix, folder))
-        self.assertFalse(matches(tool(command,Cwd="/tmp"), prefix, folder))
-        self.assertFalse(matches(tool(command,Environment={"PATH":"/tmp"}), prefix, folder))
-        self.assertFalse(matches({"kind":"edit","rawInput":{"CommandLine":command}}, prefix, folder))

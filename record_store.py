@@ -33,7 +33,7 @@ def reconcile(db, save):
             row = db.execute("SELECT folder_ready,state FROM sessions WHERE id=?", (sid,)).fetchone()
             if not row:
                 continue
-            busy = row["state"] in ("active", "implementing") or db.execute(
+            busy = row["state"] in ("active", "implementing", "summarizing") or db.execute(
                 "SELECT 1 FROM calls WHERE session=? AND ended IS NULL LIMIT 1", (sid,)).fetchone()
             if not row["folder_ready"]:
                 location.mkdir(mode=0o700, parents=True, exist_ok=True)

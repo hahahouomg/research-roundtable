@@ -1,23 +1,112 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="roundtable-key" content="__LOCAL_KEY__"><meta name="color-scheme" content="light dark"><title>Roundtable · 科研圆桌</title>
-<link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
-<body><div class="shell">
-<aside id="rail"><div class="brand"><span class="brandmark" aria-hidden="true"></span><b>Roundtable</b><button id="closeNav" class="mobile iconbtn" aria-label="关闭侧栏">×</button></div>
-<button id="new" class="new"><b aria-hidden="true">＋</b> 新讨论</button>
-<div class="railcap"><h2>项目</h2><button id="add" class="iconbtn" title="新建项目" aria-label="新建项目">＋</button></div>
-<nav id="projects" aria-label="项目"></nav>
-<section id="liveNav" hidden><div class="railcap"><h2>进行中</h2></div><nav id="liveItems" aria-label="正在进行的讨论"></nav></section><div class="railcap historycap"><h2>最近讨论</h2></div><nav id="history" aria-label="最近讨论"></nav>
-<div class="railfoot"><button id="settings" class="quiet"><span data-icon="settings"></span> 项目设置</button></div></aside>
-<button class="scrim" id="scrim" aria-label="关闭侧栏"></button>
-<main><header><button id="menu" class="mobile iconbtn" aria-label="打开项目和历史"><span data-icon="menu"></span></button><span class="crumb"><span data-icon="folder"></span><span id="projectTitle">项目</span><i>/</i><b>圆桌</b></span>
-<button id="health" class="health">订阅额度</button></header>
-<div id="offline" role="status" hidden>正在重新连接本机圆桌 <button class="quiet" id="reconnect">重试</button></div><div id="stage"><div class="content">
-<section id="intro" class="intro"><div><h1>想一起讨论什么<span>？</span></h1><p>把想验证的假设、待解的问题或开发任务放上圆桌。</p></div></section>
-<section id="conversation" hidden aria-label="讨论详情"></section>
-<form id="composer"><label class="sr" for="topic">讨论内容</label><textarea id="topic" rows="3" placeholder="写下你的问题…" required></textarea>
-<div class="composebar"><div class="compose-settings"><label class="mode"><span data-icon="discuss"></span><select id="mode" aria-label="讨论方式"><option value="both">共同讨论</option><option value="codex">只问 Codex</option><option value="gemini">只问 Gemini</option></select></label><label class="mode" id="moderatorField"><span>主持</span><select id="moderator" aria-label="本轮主持人"><option value="">自动</option><option value="codex">Codex</option><option value="gemini">Gemini</option></select></label></div>
-<button class="primary" id="send" type="submit">开始讨论 <span data-icon="arrow"></span></button></div></form>
-<section id="participants"><div class="sectioncap"><h2>讨论席</h2><span>点击型号可更换</span></div><div id="seats"></div><p id="claudeError" class="formerror claude-error" role="alert" hidden></p></section>
-</div></div></main></div>
-<dialog id="modal" aria-labelledby="modalTitle"><div class="dialoghead"><h2 id="modalTitle"></h2><button class="iconbtn" id="closeModal" aria-label="关闭">×</button></div><div id="modalBody"></div><p class="formerror" role="alert" hidden id="formError"></p></dialog>
-<div id="notice" role="status" hidden></div></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="roundtable-key" content="__LOCAL_KEY__">
+  <meta name="color-scheme" content="light dark">
+  <title>Roundtable · 科研圆桌</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside id="rail">
+      <div class="brand">
+        <span class="brandmark" aria-hidden="true"></span>
+        <span class="brand-text">
+          <b>Roundtable</b>
+          <span class="brand-sub">科研圆桌</span>
+        </span>
+        <button id="closeNav" class="mobile iconbtn" aria-label="关闭侧栏">×</button>
+      </div>
+      <button id="new" class="new"><b aria-hidden="true">＋</b> 新讨论</button>
+      <div class="railcap">
+        <h2>项目</h2>
+        <button id="add" class="iconbtn" title="新建项目" aria-label="新建项目">＋</button>
+      </div>
+      <nav id="projects" aria-label="项目"></nav>
+      <section id="liveNav" hidden>
+        <div class="railcap"><h2>进行中</h2></div>
+        <nav id="liveItems" aria-label="正在进行的讨论"></nav>
+      </section>
+      <div class="railcap historycap"><h2>最近讨论</h2></div>
+      <nav id="history" aria-label="最近讨论"></nav>
+      <div class="railfoot">
+        <button id="settings" class="quiet"><span data-icon="settings"></span> 项目设置</button>
+      </div>
+    </aside>
+    <button class="scrim" id="scrim" aria-label="关闭侧栏"></button>
+    <main>
+      <header>
+        <button id="menu" class="mobile iconbtn" aria-label="打开项目和历史"><span data-icon="menu"></span></button>
+        <span class="crumb">
+          <span data-icon="folder"></span>
+          <span id="projectTitle">项目</span>
+          <i aria-hidden="true">/</i>
+          <b>圆桌</b>
+        </span>
+        <button id="health" class="health">订阅额度</button>
+      </header>
+      <div id="offline" role="status" hidden>
+        <span>正在重新连接本机圆桌</span>
+        <button class="quiet" id="reconnect">重试</button>
+      </div>
+      <div id="stage">
+        <div class="content">
+          <section id="intro" class="intro">
+            <div class="intro-copy">
+              <h1>想一起讨论什么<span>？</span></h1>
+              <p class="intro-lead">把想验证的假设、待解的问题或开发任务放上圆桌。</p>
+            </div>
+          </section>
+          <section id="conversation" hidden aria-label="讨论详情"></section>
+          <form id="composer">
+            <label class="sr" for="topic">讨论内容</label>
+            <textarea id="topic" rows="3" placeholder="写下你的问题…" required></textarea>
+            <div class="composebar">
+              <div class="compose-settings">
+                <label class="mode">
+                  <span data-icon="discuss"></span>
+                  <select id="mode" aria-label="讨论方式">
+                    <option value="both">共同讨论</option>
+                    <option value="codex">只问 Codex</option>
+                    <option value="gemini">只问 Gemini</option>
+                  </select>
+                </label>
+                <label class="mode" id="moderatorField">
+                  <span>主持</span>
+                  <select id="moderator" aria-label="本轮主持人">
+                    <option value="">自动</option>
+                    <option value="codex">Codex</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                </label>
+              </div>
+              <button class="primary" id="send" type="submit">开始讨论 <span data-icon="arrow"></span></button>
+            </div>
+          </form>
+          <section id="participants">
+            <div class="sectioncap">
+              <h2>讨论席</h2>
+              <span>点击型号可更换</span>
+            </div>
+            <div id="seats"></div>
+            <p id="claudeError" class="formerror claude-error" role="alert" hidden></p>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+  <dialog id="modal" aria-labelledby="modalTitle">
+    <div class="dialoghead">
+      <h2 id="modalTitle"></h2>
+      <button class="iconbtn" id="closeModal" aria-label="关闭">×</button>
+    </div>
+    <div id="modalBody"></div>
+    <p class="formerror" role="alert" hidden id="formError"></p>
+  </dialog>
+  <div id="notice" role="status" hidden></div>
+</body>
+</html>

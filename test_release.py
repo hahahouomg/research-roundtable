@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from local_settings import claude_ip
+from outcomes import CallFailure
 from projects import model_command, project_command, project_row
 from record_store import discussion_folder
 import roundtable as rt
@@ -112,3 +113,43 @@ class PortableReleaseTests(unittest.TestCase):
             asyncio.run(rt.resume_discussion(self.db,sid,"默认"))
         self.assertEqual(rt.session(self.db,sid)["state"],"chat")
         self.assertEqual(call.await_args.args[0],"codex")
+
+    def test_each_seat_uses_shared_timeouts_and_failure_categories(self):
+        self.db.execute("UPDATE projects SET call_minutes=24,tool_mode='auto'")
+        sid, _, _ = rt.prepare_topic(self.db,"统一设置",None,"默认")
+        async def run():
+            cases = [
+                ("codex", "跨席评议", asyncio.TimeoutError(), "timeout"),
+                ("gemini", "候选方案 v1", ValueError("RESOURCE_EXHAUSTED"), "quota"),
+                ("claude", "集成复核", CallFailure("provider_safety", "服务方拒绝"), "provider_safety"),
+            ]
+            for agent, stage, exc, kind in cases:
+                with patch("roundtable.invoke", side_effect=exc) as invoke:
+                    self.assertIsNone(await rt.call(self.db,sid,stage,agent,"测试","fake"))
+                    self.assertEqual(invoke.await_args.kwargs["timeout_seconds"],24*60)
+                    self.assertEqual(invoke.await_args.kwargs["tool_mode"],"auto")
+                stored = self.db.execute("SELECT failure_kind FROM calls WHERE session=? AND agent=?", (sid,agent)).fetchone()[0]
+                self.assertEqual(stored,kind)
+        asyncio.run(run())
+
+    def test_close_dispute_preserves_votes_and_allows_summary_retry(self):
+        sid, _, _ = rt.prepare_topic(self.db, "候选方案比较", None, "默认", rounds=1)
+        vote = '{"vote":"object","reason":"缺少对照"}'
+        self.db.execute("UPDATE sessions SET state='disputed',plan='候选方案' WHERE id=?", (sid,))
+        self.db.execute("""INSERT INTO calls(session,stage,agent,reply,ended)
+                           VALUES(?,'表决 v1','codex',?,1)""", (sid,vote))
+        with patch("roundtable.invoke", side_effect=ValueError("rate_limit")):
+            asyncio.run(rt.close_discussion(self.db,sid,"默认"))
+        self.assertEqual(rt.session(self.db,sid)["state"],"closed")
+        self.assertIsNone(rt.discussion_summary(self.db,sid))
+        with patch("roundtable.invoke", return_value=("保留分歧的总结",{})) as invoke:
+            asyncio.run(rt.close_discussion(self.db,sid,"默认"))
+            self.assertEqual(invoke.await_args.args[0],"gemini")
+            self.assertIn(vote,invoke.await_args.args[1])
+        self.assertEqual(rt.session(self.db,sid)["plan"],"候选方案")
+        self.assertEqual(rt.discussion_summary(self.db,sid)["reply"],"保留分歧的总结")
+        self.assertEqual((discussion_folder("默认",sid)/"讨论总结.md").read_text(encoding="utf-8"),"保留分歧的总结\n")
+        with self.assertRaises(ValueError):
+            asyncio.run(rt.implement(self.db,sid,os.environ["ROUNDTABLE_HOME"]))
+        with self.assertRaises(ValueError):
+            asyncio.run(rt.close_discussion(self.db,sid,"默认"))

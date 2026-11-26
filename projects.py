@@ -24,9 +24,9 @@ def setup(db):
             db.execute("ALTER TABLE calls ADD COLUMN model TEXT")
         for table, column, definition in (
             ("projects", "codex_effort", "TEXT"),
-            ("projects", "gemini_auto_lab", "INTEGER NOT NULL DEFAULT 0"),
-            ("projects", "gemini_mode", "TEXT NOT NULL DEFAULT 'auto'"),
+            ("projects", "tool_mode", "TEXT NOT NULL DEFAULT 'cli'"),
             ("projects", "call_minutes", "INTEGER"),
+            ("projects", "plan_versions", "INTEGER NOT NULL DEFAULT 2"),
             ("projects", "claude", "TEXT"),
             ("projects", "claude_effort", "TEXT"),
             ("projects", "claude_enabled", "INTEGER NOT NULL DEFAULT 0"),
@@ -37,12 +37,17 @@ def setup(db):
             ("sessions", "assignments", "TEXT"),
             ("calls", "effort", "TEXT"),
             ("calls", "owner", "INTEGER"),
+            ("calls", "failure_kind", "TEXT"),
             ("projects", "trashed", "INTEGER DEFAULT 0"),
             ("sessions", "trash_root", "TEXT"),
             ("sessions", "stop_requested", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                if table == "projects" and column == "tool_mode" and "gemini_mode" in {
+                    r["name"] for r in db.execute("PRAGMA table_info(projects)")
+                }:
+                    db.execute("UPDATE projects SET tool_mode='auto' WHERE gemini_mode='auto'")
         # Expose records archived in earlier releases without deleting their contents.
         if db.execute("PRAGMA user_version").fetchone()[0] == 0:
             db.execute("UPDATE projects SET trashed=0 WHERE trashed=1")

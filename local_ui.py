@@ -23,7 +23,8 @@ from local_settings import claude_ip
 from record_store import discussion_folder, project_folder
 from runtime import show_folder
 from projects import claude_access, configure_claude_ip, model_command, models_for, project_command, project_row, workspace
-from providers import MODEL_SEATS, binary, model_options
+from outcomes import failure_kind
+from providers import MODEL_SEATS, binary, default_timeout, model_options
 
 ASSETS = Path(__file__).resolve().parent / "ui"
 FILES = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
@@ -63,20 +64,27 @@ def state(db, project, sid=None):
         selected["notice"] = settings.get("notice")
         selected["moderator"] = rt.moderator_for(db, sid, settings["models"]) if "models" in settings and settings.get("mode", "both") == "both" else None
         selected["can_resume"] = record["state"] == "incomplete" and settings.get("mode") in ("both", *settings.get("models", {}))
+        selected["plan_versions"] = settings.get("plan_versions") if selected["moderator"] else None
         selected["folder"] = str(discussion_folder(project, sid))
         selected["has_pdf"] = pdf_path(record["id"], project).is_file()
-        selected["calls"] = [dict(c) for c in db.execute("""SELECT id,stage,agent,model,effort,reply,error,usage,ended,started
-                                                FROM calls WHERE session=? ORDER BY id""", (sid,))]
+        selected["calls"] = [dict(c, failure_kind=c["failure_kind"] or failure_kind(c["error"])) for c in db.execute("""
+                             SELECT id,stage,agent,model,effort,reply,error,failure_kind,usage,ended,started
+                             FROM calls WHERE session=? ORDER BY id""", (sid,))]
         selected["permissions"] = [
-            dict(id=p["id"], stage=p["stage"], details=json.loads(p["details"]), can_allow=bool(p["can_allow"]))
-            for p in db.execute("""SELECT p.*, c.stage FROM tool_permissions p JOIN calls c ON c.id=p.call_id
+            dict(id=p["id"], stage=p["stage"], agent=p["agent"], details=json.loads(p["details"]), can_allow=bool(p["can_allow"]))
+            for p in db.execute("""SELECT p.*, c.stage, c.agent FROM tool_permissions p JOIN calls c ON c.id=p.call_id
                         WHERE c.session=? AND c.ended IS NULL AND p.decision='pending' ORDER BY p.id""", (sid,))]
     running = [dict(r) for r in db.execute("""SELECT s.id,s.project,substr(s.topic,1,70) AS topic,s.state,s.stop_requested,
                    EXISTS (SELECT 1 FROM tool_permissions p JOIN calls c ON p.call_id=c.id
                            WHERE c.session=s.id AND c.ended IS NULL AND p.decision='pending') AS awaiting
-                   FROM sessions s WHERE s.trash_root IS NULL AND (s.state IN ('active','implementing')
+                   FROM sessions s WHERE s.trash_root IS NULL AND (s.state IN ('active','implementing','summarizing')
                    OR EXISTS (SELECT 1 FROM calls c WHERE c.session=s.id AND c.ended IS NULL)) ORDER BY s.started DESC""")]
-    return dict(project=project, isolated_lab_available=sys.platform.startswith("linux"), auto_lab=bool(row["gemini_auto_lab"]), gemini_mode=row["gemini_mode"], call_minutes=row["call_minutes"],
+    try:
+        configured_timeout = default_timeout()
+    except ValueError:
+        configured_timeout = None
+    return dict(project=project, tool_mode=row["tool_mode"], call_minutes=row["call_minutes"],
+                plan_versions=row["plan_versions"], default_timeout_seconds=configured_timeout,
                 claude_configured=bool(claude_ip()),
                 native_folders=bool(os.name == "nt" or sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
                 project_folder=str(project_folder(project)), running=running, path=str(workspace(row) or ""), projects=[r[0] for r in db.execute(
@@ -248,17 +256,16 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         raise ValueError("图文 PDF 尚未生成")
                 elif post and url.path == "/api/preferences":
-                    gemini_mode = body.get("gemini_mode")
+                    saved = project_row(db, project)
+                    tool_mode = body.get("tool_mode")
                     minutes = int(body.get("minutes") or 0)
-                    if gemini_mode not in ("auto", "cli", "review") or not 0 <= minutes <= 120:
-                        raise ValueError("请选择工具策略及 1–120 分钟的单次超时")
-                    db.execute("UPDATE projects SET gemini_mode=?,call_minutes=? WHERE name=?",
-                               (gemini_mode, minutes or None, project))
-                    result = {"ok": True}
-                elif post and url.path == "/api/auto-lab":
-                    if body.get("enabled") not in ("on", "off"):
-                        raise ValueError("无效的实验权限设置")
-                    db.execute("UPDATE projects SET gemini_auto_lab=? WHERE name=?", (body["enabled"]=="on", project))
+                    versions = int(body.get("plan_versions", saved["plan_versions"]))
+                    if tool_mode not in ("auto", "cli") or not 0 <= minutes <= 120:
+                        raise ValueError("请选有效的工具策略，超时可留空或填写 1–120 分钟")
+                    if versions not in (1, 2, 3):
+                        raise ValueError("请选择 1–3 版候选方案")
+                    db.execute("""UPDATE projects SET tool_mode=?,call_minutes=?,plan_versions=?
+                                  WHERE name=?""", (tool_mode, minutes or None, versions, project))
                     result = {"ok": True}
                 elif post and url.path == "/api/permission":
                     rt.decide_tool(db, sid, project, body["request"], body["decision"])
@@ -268,6 +275,9 @@ class Handler(BaseHTTPRequestHandler):
                     result = {"ok":True}
                 elif post and url.path == "/api/resume":
                     asyncio.run(rt.resume_discussion(db, sid, project))
+                    result = {"session":sid}
+                elif post and url.path == "/api/close-discussion":
+                    asyncio.run(rt.close_discussion(db, sid, project))
                     result = {"session":sid}
                 elif post and url.path == "/api/project":
                     action = body["action"]
@@ -306,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
                     if mode not in (*models_for(project_row(db, project)), "both"):
                         raise ValueError("未知讨论模式")
                     sid, context, models = rt.prepare_topic(db, body["topic"].strip(), sid, project, body.get("moderator", "") if mode == "both" else "", mode)
-                    start_worker(rt.run_topic, sid, context, models, None if mode == "both" else mode, 2, False)
+                    start_worker(rt.run_topic, sid, context, models, None if mode == "both" else mode, None, False)
                     result = {"session": sid}
                 elif post and url.path == "/api/implement":
                     # The engine claims the approved plan atomically. Its running state is visible to polling tabs.

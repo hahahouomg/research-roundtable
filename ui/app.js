@@ -18,8 +18,8 @@ const icon = name => '<svg class="ic" aria-hidden="true" viewBox="0 0 24 24">'+p
 document.querySelectorAll("[data-icon]").forEach(el => el.innerHTML = icon(el.dataset.icon));
 const labels = {codex:"Codex",gemini:"Gemini",claude:"Claude"};
 const glyph = a => '<span aria-hidden="true" class="glyph '+a+'">'+({codex:"›_",gemini:"✦",claude:"∗"}[a])+'</span>';
-const states = {stopped:"已停止",active:"讨论中",chat:"已回复",consensus:"已达成共识",disputed:"仍有分歧",incomplete:"未完成",implementing:"实施中",returned:"实施已返回",inspect:"实施中断",probe:"连接已验证"};
-const ongoing = s => s === "active" || s === "implementing";
+const states = {stopped:"已停止",active:"讨论中",chat:"已回复",consensus:"已达成共识",disputed:"仍有分歧",incomplete:"未完成",implementing:"实施中",returned:"实施已返回",inspect:"实施中断",probe:"连接已验证",summarizing:"Gemini 正在总结",closed:"已结束 · 保留分歧"};
+const ongoing = s => ["active","implementing","summarizing"].includes(s);
 const num = n => Number(n || 0).toLocaleString();
 const q = new URLSearchParams(location.search);
 let project = q.get("project"), sid = q.get("session"), data, serial = 0, pending = false, poll, modalVersion = 0;
@@ -140,10 +140,25 @@ function inline(text){
   return esc(text).replace(/`([^`\n]+)`/g,"<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g,"<strong>$1</strong>");
 }
 function prose(text){
-  return String(text || "").split(/^```[^\n]*$/m).map((block,i)=>i%2 ? "<pre>"+esc(block.trim())+"</pre>" :
-    block.trim().split(/\n\s*\n/).filter(Boolean).map(part=>part.split("\n").map(line=>{
-      const h=line.match(/^#{1,6}\s+(.+)$/);return h?"<h4>"+inline(h[1])+"</h4>":"<p>"+inline(line)+"</p>";
-    }).join("")).join("")).join("");
+  return String(text || "").split(/^```[^\n]*$/m).map((block,i)=>{
+    if(i%2)return "<pre>"+esc(block.trim())+"</pre>";
+    let list="",html="";
+    for(const line of block.split("\n")){
+      const item=line.match(/^\s*(?:([-*+])|(\d+)[.)])\s+(.+)$/);
+      const next=item?(item[2]?"ol":"ul"):"";
+      if(next!==list){
+        if(list)html+="</"+list+">";
+        if(next)html+="<"+next+">";
+        list=next;
+      }
+      if(item){html+="<li>"+inline(item[3])+"</li>";continue;}
+      if(!line.trim())continue;
+      const h=line.match(/^(#{1,6})\s+(.+)$/);
+      if(h){const level=h[1].length<=2?"h4":"h5";html+="<"+level+">"+inline(h[2])+"</"+level+">";}
+      else html+="<p>"+inline(line)+"</p>";
+    }
+    return html+(list?"</"+list+">":"");
+  }).join("");
 }
 function ballot(text){
   try{const b=JSON.parse(text);if(b.reason && ["accept","object"].includes(b.vote))return (b.vote==="accept"?"赞成 · ":"有异议 · ")+b.reason;}catch{}
@@ -219,18 +234,26 @@ function render(){
 function finalDraft(s){
   return s.calls.find(c=>c.stage==="最终方案撰写" && c.agent==="gemini" && c.ended && !c.error)?.reply;
 }
+function closingDraft(s){
+  return s.calls.find(c=>c.stage==="讨论总结" && c.agent==="gemini" && c.ended && !c.error)?.reply;
+}
 function permissionCard(req, expanded){
   const d=req.details, input=d.rawInput||d.args||{};
+  const agent=labels[req.agent]||"席位";
   const command=input.CommandLine||input.command;
   const summary=input.toolSummary||d.title||d.kind||"工具请求";
   const detail=Object.fromEntries(Object.entries(d).filter(([k])=>k!=="cwd"));
-  return '<section class="permission" data-key="permission-'+req.id+'" aria-label="Gemini 工具授权"><h3>Gemini 正在等你确认</h3>'+
+  return '<section class="permission" data-key="permission-'+req.id+'" aria-label="'+esc(agent)+' 工具授权"><h3>'+esc(agent)+' 正在等你确认</h3>'+
     '<p>'+esc(req.stage)+' · '+esc(summary)+'</p><p class="hint">工作目录 · '+esc(d.cwd)+'</p>'+
     (typeof command==="string"?'<pre>'+esc(command)+'</pre>':'')+
     '<details data-request-detail="'+req.id+'" '+(expanded||!command?'open':'')+'><summary>完整工具参数</summary><pre>'+esc(JSON.stringify(detail,null,2))+'</pre></details>'+
     '<div class="dialogactions"><button class="quiet" data-permission="'+req.id+'" data-choice="deny">拒绝并停止本席</button>'+
     (req.can_allow?'<button class="primary" data-permission="'+req.id+'" data-choice="allow">仅允许这一次</button>':'')+'</div></section>';
 }
+const failureLabels={
+  timeout:"调用超时",quota:"额度或频率受限",provider_safety:"服务方内容安全限制",
+  tool_permission:"工具权限受限",account_access:"账号或连接核验失败",interrupted:"调用中断",provider_error:"调用失败"
+};
 function renderDiscussion(s){
   const calls=s.calls;
   const lastReply=stage=>calls.filter(c=>c.stage===stage && c.reply).slice(-1)[0]?.reply;
@@ -239,21 +262,22 @@ function renderDiscussion(s){
     try{report=JSON.parse(c.reply).report||report;}catch{}
     return labels[c.agent]+" · "+c.stage+" · "+report;
   });
-  const draft=finalDraft(s);
-  const result=reports.length?reports.join("\n\n"):draft||s.plan||lastReply("单聊");
-  const resultLabel=reports.length?"实施报告":draft?"最终方案 · Gemini 执笔":s.state==="consensus"?"共识方案":s.plan?"候选方案":"回复";
+  const draft=finalDraft(s), summary=closingDraft(s);
+  const result=reports.length?reports.join("\n\n"):summary||draft||s.plan||lastReply("单聊");
+  const resultLabel=reports.length?"实施报告":summary?"讨论总结":draft?"最终方案 · Gemini 执笔":s.state==="consensus"?"共识方案":s.plan?"候选方案":"回复";
   const failures=calls.filter((c,i)=>c.error && !calls.slice(i+1).some(n=>n.stage===c.stage && n.agent===c.agent && n.ended && !n.error));
   const lastStage=calls[calls.length-1]?.stage;
   const totals=calls.map(c=>JSON.parse(c.usage||"{}").total).filter(Number.isFinite);
   const used=totals.length?num(totals.reduce((sum,n)=>sum+n,0))+" tokens":"用量待回报";
-  const stateStyle=["consensus","returned","chat","probe"].includes(s.state)?"done":["disputed","inspect","incomplete"].includes(s.state)?"warn":"";
+  const stateStyle=["consensus","returned","chat","probe"].includes(s.state)?"done":["disputed","closed","inspect","incomplete"].includes(s.state)?"warn":"";
   const busy=ongoing(s.state);
   const concise=s.topic.length>95 ? (s.topic.match(/^.{8,75}?[？。！？]/u)?.[0] || s.topic.slice(0,76)+"…") : s.topic;
   let html='<div class="topline"><span class="state '+stateStyle+'" aria-live="polite">'+esc(s.stop_requested&&busy?"正在停止":states[s.state]||s.state)+(busy&&lastStage?' · '+esc(lastStage):'')+'</span>';
   if(!busy)html+='<button class="quiet jump-reply" id="jumpReply">去追问</button>';
   if(s.moderator)html+='<span class="hint moderator-label">主持 · '+esc(labels[s.moderator])+'</span>';
-  html+= busy ? '<button class="stop" id="stop" '+(s.stop_requested?'disabled':'')+'>'+ (s.stop_requested?'正在停止…':s.state==="implementing"?'停止实施':'停止本轮')+'</button>' : "";
+  html+= busy ? '<button class="stop" id="stop" '+(s.stop_requested?'disabled':'')+'>'+ (s.stop_requested?'正在停止…':s.state==="implementing"?'停止实施':s.state==="summarizing"?'停止总结':'停止本轮')+'</button>' : "";
   html+='</div><h1 class="topic-title">'+esc(concise)+'</h1>';
+  if(s.state==="active" && s.plan_versions)html+='<p class="hint">最多表决 '+s.plan_versions+' 版</p>';
   for(const request of s.permissions||[]){
     const expanded=document.querySelector('[data-request-detail="'+request.id+'"]')?.open;
     html+=permissionCard(request,expanded);
@@ -271,20 +295,36 @@ function renderDiscussion(s){
     }).join("")+'</div>';
   }
   if(s.workspace)html+='<p class="hint">实施目录 · '+esc(s.workspace)+'</p>';
-  if(s.plan && !busy)html+='<button class="quiet" id="exportPlan">下载'+(s.state==="disputed"?"候选方案":"方案")+'</button>';
+  if((summary||s.plan) && !busy)html+='<button class="quiet" id="exportPlan">下载'+(summary?"讨论总结":["disputed","closed","incomplete"].includes(s.state)?"候选方案":"方案")+'</button>';
   if(draft && !busy)html+='<button class="quiet" id="exportPDF">'+(s.has_pdf?'下载图文 PDF':'请 Gemini 排版 PDF')+'</button>';
   if(!busy)html+='<button class="quiet" id="discussionFolder">'+icon("folder")+' 记录文件夹</button>';
   if(calls.length && !busy)html+='<button class="quiet" id="exportRecord">下载讨论记录</button>';
   if(s.parent)html+='<button class="quiet" data-session="'+esc(s.parent)+'">← 上一轮讨论</button>';
-  if(result)html+='<article class="result"><h3>'+resultLabel+'</h3><div class="prose">'+prose(result)+'</div></article>';
+  if(s.state==="closed" || s.state==="summarizing")html+='<p class="summary-note">本轮未达成共识。原始提案、异议与表决已保留。</p>';
+  if(s.state==="disputed"){
+    html+='<section class="result dispute-panel" data-key="disputes"><h3>表决结束，仍有分歧</h3>'+
+      calls.filter(c=>c.stage===lastStage&&c.reply).map(c=>'<p class="prose">'+esc(labels[c.agent])+' · '+esc(ballot(c.reply))+'</p>').join("")+
+      '<div class="discussion-actions"><button id="continueDispute" class="primary">带着分歧继续讨论</button>'+
+      '<button id="closeDiscussion" class="quiet">结束并请 Gemini 总结</button></div></section>';
+  }
+  if(result)html+='<article class="result" data-key="result"><h3>'+resultLabel+'</h3><div class="prose">'+prose(result)+'</div></article>';
   if(draft)html+='<details data-key="approved-plan"><summary>全体表决通过的原稿及分工</summary><div class="prose">'+prose(s.plan)+'</div></details>';
-  if(s.state==="disputed")html+='<div class="result"><h3>待解决的分歧</h3>'+calls.filter(c=>c.stage===lastStage&&c.reply).map(c=>'<p class="prose">'+esc(labels[c.agent])+' · '+esc(ballot(c.reply))+'</p>').join("")+'<button id="continueDispute" class="quiet">根据异议继续讨论</button></div>';
+  if(summary && s.plan)html+='<details data-key="last-candidate"><summary>最后一版候选方案</summary><div class="prose">'+prose(s.plan)+'</div></details>';
+  if(s.state==="closed" && !summary)html+='<button id="closeDiscussion" class="quiet">重试 Gemini 总结</button>';
   if(s.notice)html+='<p class="hint">'+esc(s.notice)+'</p>';
   if(s.failure && (s.state!=="incomplete" || !failures.length))html+='<p class="formerror">'+esc(s.failure)+'</p>';
   if((s.state==="incomplete" && (s.can_resume || calls.some(c=>c.stage==="独立提案"))) || (s.state==="consensus" && !draft && calls.some(c=>c.stage==="最终方案撰写" && c.error)))html+='<button id="resumeDiscussion" class="quiet">从中断阶段续跑</button>';
   if(s.state==="incomplete"&&!s.failure&&!failures.length)html+='<p class="hint">本轮未收齐有效回复。可展开逐轮发言，或在「订阅额度」中查看账号额度。</p>';
-  if(failures.some(c=>c.error.includes("额度或频率受限")))html+='<button class="quiet" id="failureQuota">查看订阅额度</button>';
-  if(failures.length && s.state!=="stopped")html+='<p class="formerror">'+failures.map(c=>esc(labels[c.agent])+' · '+esc(c.error)).join("<br>")+'</p>';
+  if(failures.length && s.state!=="stopped"){
+    html+='<section class="call-errors" data-key="call-errors" aria-label="调用问题">'+failures.map(c=>{
+      const title=failureLabels[c.failure_kind]||failureLabels.provider_error;
+      return '<details data-key="call-error-'+c.id+'"><summary>'+esc(labels[c.agent])+' · '+esc(c.stage)+' · '+esc(title)+'</summary>'+
+        (c.error===title?'':'<p class="prose">'+esc(c.error)+'</p>')+'</details>';
+    }).join("")+
+    (failures.some(c=>c.failure_kind==="quota")?'<button class="quiet" id="failureQuota">查看订阅额度</button>':'')+
+    (failures.some(c=>c.failure_kind==="timeout")?'<button class="quiet" id="failureTimeout">调整单次超时</button>':'')+
+    '</section>';
+  }
 
   if(s.state==="consensus")html+='<div class="discussion-actions"><button id="implement" class="primary">按分工实施 '+icon("arrow")+'</button></div>';
   if(calls.length)html+='<details id="transcript"'+(detailOpen?' open':'')+'><summary>逐轮发言 · '+calls.length+' 次调用 · '+esc(used)+'</summary>'+(detailOpen?calls.map(c=>{
@@ -354,38 +394,38 @@ async function pickModel(agent){
     };
   }catch(e){if(version===modalVersion){$("choices").textContent="";error(e);}}
 }
-function projectDialog(create){
+function projectDialog(create, openRunSettings=false){
   closeNav();
   dialog(create?"新建项目":"项目设置",'<form id="projectForm">'+(create?'<label for="pName">项目名称</label><input id="pName" class="field" placeholder="例如，文献检索" required maxlength="120">':'<p class="hint">'+esc(project)+'</p>')+
     '<label for="pPath">工作目录'+(create?'（可选）':'')+'</label><input id="pPath" class="field" value="'+esc(create?"":data.path)+'" placeholder="'+(create?'留空自动创建':'输入已有目录的路径')+'" '+(create?"":"required")+'><p class="hint">讨论时各席使用此目录的实验副本。确认实施后按分工写入原目录。</p><div class="dialogactions"><button class="primary">'+(create?'创建项目':'保存目录')+'</button></div></form>');
   directoryPicker("pPath");
   if(!create){
+    const timeout=data.default_timeout_seconds;
+    const fallback=timeout===null?'请填写分钟数':timeout%60===0?'默认 '+(timeout/60)+' 分钟':'默认 '+timeout+' 秒';
     $("modalBody").insertAdjacentHTML("beforeend",
       '<section class="project-storage"><h3>讨论数据</h3><button type="button" class="quiet" id="projectFolder">'+icon("folder")+' 项目记录文件夹</button></section>'+
-      '<details class="advanced"><summary>工具与运行</summary><form id="preferences">'+
-      '<label for="geminiMode">Gemini 工具权限</label><select class="field" id="geminiMode"><option value="auto">优先 Auto</option><option value="cli">跟随 CLI</option><option value="review">每次确认</option></select>'+
-      '<p class="hint">Auto 由 agy 提供，仍可能请你在网页确认。CLI 的禁止规则优先。</p>'+
-      '<label for="timeout">单次调用超时（分钟）</label><input id="timeout" class="field" type="number" min="1" max="120" placeholder="默认 5 分钟，实施 20 分钟" value="'+esc(data.call_minutes??"")+'">'+
-      '<p class="hint">等待工具确认的时间另计。</p><div class="dialogactions"><button class="primary">保存运行设置</button></div></form>'+
-      (data.isolated_lab_available?'<label><input type="checkbox" id="autoLab" '+(data.auto_lab?'checked':'')+'> Gemini 自动运行离线实验</label>':'')+
-      '<button class="quiet" type="button" id="claudeConfig">Claude 出口设置</button></details>');
-    $("geminiMode").value=data.gemini_mode;
+      '<details class="advanced"'+(openRunSettings?' open':'')+'><summary>运行设置</summary><form id="preferences">'+
+      '<label for="roundCount">候选方案表决上限</label><select class="field" id="roundCount"><option value="1">1 版</option><option value="2">2 版（默认）</option><option value="3">3 版</option></select>'+
+      '<p class="hint">适用于新讨论，全票通过即进入定稿。</p>'+
+      '<label for="timeout">单次调用超时（分钟）</label><input id="timeout" class="field" type="number" min="1" max="120" placeholder="'+fallback+'" value="'+esc(data.call_minutes??"")+'">'+
+      '<p class="hint">每个席位在一个阶段的一次调用，讨论和实施共用。等待网页工具确认时暂停计时。</p>'+
+      '<div class="tool-settings"><label for="toolMode">三席工具策略</label><select class="field" id="toolMode"><option value="cli">跟随 CLI</option><option value="auto">优先 Auto</option></select>'+
+      '<p class="hint">Auto 取决于 CLI 与账号。工具仍受各席的工作目录和权限限制。</p></div>'+
+      '<div class="dialogactions"><button class="primary">保存运行设置</button></div></form></details>');
+    $("modalBody").insertAdjacentHTML("beforeend",'<button class="quiet" type="button" id="claudeConfig">Claude 出口设置</button>');
+    $("toolMode").value=data.tool_mode;
+    $("roundCount").value=String(data.plan_versions);
     $("preferences").onsubmit=async e=>{
       e.preventDefault();
       const b=e.submitter;b.disabled=true;
       try{
-        await api("preferences",{project,gemini_mode:$("geminiMode").value,minutes:$("timeout").value});
+        await api("preferences",{project,tool_mode:$("toolMode").value,minutes:$("timeout").value,plan_versions:$("roundCount").value});
         await refresh();notify("已保存运行设置");
       }catch(ex){error(ex);}finally{b.disabled=false;}
     };
-    if($("autoLab"))$("autoLab").onchange=async e=>{
-      const btn=e.target;btn.disabled=true;
-      try{await api("auto-lab",{project,enabled:btn.checked?"on":"off"});await refresh();notify("已保存实验权限");}
-      catch(ex){btn.checked=!btn.checked;error(ex);}finally{btn.disabled=false;}
-    };
     $("claudeConfig").onclick=()=>claudeConfig(false);
   }
-  (create?$("pName"):$("pPath")).focus();
+  (create?$("pName"):openRunSettings?$("timeout"):$("pPath")).focus();
   $("projectForm").onsubmit=async e=>{
     e.preventDefault();const b=e.submitter;b.disabled=true;
     try{
@@ -792,6 +832,7 @@ document.addEventListener("click",async e=>{
     }
     if(b.id==="jumpReply"){$("topic").focus();return;}
     if(b.id==="failureQuota"){health();return;}
+    if(b.id==="failureTimeout"){projectDialog(false,true);return;}
     if(b.id==="discussionFolder"){showRecordFolder(sid);return;}
     if(b.id==="projectFolder"){showRecordFolder();return;}
     if(b.dataset.live){await navigate(b.dataset.owner,b.dataset.live);return;}
@@ -813,16 +854,28 @@ document.addEventListener("click",async e=>{
     }
     if(b.id==="exportRecord" || b.id==="exportPlan"){
       const id=sid, plan=b.id==="exportPlan";
-      const markdown=plan ? (finalDraft(data.selected)||("# "+project+" · "+states[data.selected.state]+"\n\n"+data.selected.plan))+"\n"
+      const summary=plan && closingDraft(data.selected);
+      const markdown=plan ? (summary||finalDraft(data.selected)||("# "+project+" · "+states[data.selected.state]+"\n\n"+data.selected.plan))+"\n"
                           : (await api("record?"+new URLSearchParams({project,session:id}))).markdown;
       const url=URL.createObjectURL(new Blob([markdown],{type:"text/markdown;charset=utf-8"}));
-      const link=document.createElement("a");link.href=url;link.download=(plan?"方案-":"圆桌-")+id+".md";link.click();
+      const link=document.createElement("a");link.href=url;link.download=(summary?"讨论总结-":plan?"方案-":"圆桌-")+id+".md";link.click();
       setTimeout(()=>URL.revokeObjectURL(url),1000);return;
     }
     if(b.id==="continueDispute"){
       $("mode").value="both";
       if(!$("topic").value.trim())$("topic").value="请保留上一版已同意的部分，逐条回应最后表决中的阻塞异议，并说明怎样验证修订。";
       saveDraft();$("topic").focus();return;
+    }
+    if(b.id==="closeDiscussion"){
+      b.disabled=true;b.dataset.busy="true";b.textContent="正在交给 Gemini…";
+      const id=sid,p=project;
+      const task=api("close-discussion",{project:p,session:id});
+      const timer=setTimeout(()=>{if(project===p&&sid===id)refresh().catch(error);},350);
+      try{await task;}finally{
+        clearTimeout(timer);delete b.dataset.busy;b.disabled=false;
+        if(project===p&&sid===id){await refresh();if(b.isConnected)renderDiscussion(data.selected);}
+      }
+      return;
     }
     if(b.id==="resumeDiscussion"){
       b.disabled=true;const id=sid, p=project;

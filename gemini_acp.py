@@ -2,13 +2,12 @@
 import asyncio
 import json
 from pathlib import Path
+from outcomes import CallFailure
 from runtime import PROCESS_GROUP, stop_process
 
 
-def execution_mode(available, auto_edits, preference="auto", current="default"):
-    if preference == "review":
-        return "default"
-    if preference == "cli":
+def execution_mode(available, preference="auto", current="default"):
+    if preference == "cli" or "auto" not in available:
         return current
     path = Path.home() / ".gemini/antigravity-cli/settings.json"
     try:
@@ -18,17 +17,13 @@ def execution_mode(available, auto_edits, preference="auto", current="default"):
     policy = saved.get("toolPermission") if isinstance(saved, dict) else "strict"
     if policy in ("strict", "request-review", "always-proceed"):
         return "default"
-    if "auto" in available and policy != "proceed-in-sandbox":
+    if policy != "proceed-in-sandbox":
         return "auto"
-    if auto_edits and "accept-edits" in available:
-        return "accept-edits"
     return "default"
 
 
-async def run(exe, folder, prompt, model, schema, timeout, log, on_text, on_permission, on_tool, auto_edits=False, preference="auto"):
+async def run(exe, folder, prompt, model, schema, timeout, log, on_text, on_permission, on_tool, preference="auto"):
     args = [exe, "acp", "--sandbox", "--log-file", str(log)]
-    if preference == "review":
-        args += ["--settings", json.dumps({"toolPermission": "strict"})]
     diagnostics = log.with_name("agy-stderr.log")
     with diagnostics.open("wb") as stderr:
         proc = await asyncio.create_subprocess_exec(
@@ -95,7 +90,7 @@ async def run(exe, folder, prompt, model, schema, timeout, log, on_text, on_perm
                 outcome = {"outcome": "selected", "optionId": choice} if choice else {"outcome": "cancelled"}
                 await send({"id": msg["id"], "result": {"outcome": outcome}})
                 if not allowed or not choice:
-                    raise ValueError("Gemini 本次工具请求已拒绝，本席已停止")
+                    raise CallFailure("tool_permission", "Gemini 本次工具请求已拒绝，本席已停止")
             elif "id" in msg:
                 await send({"id": msg["id"], "error": {"code": -32601, "message": "Client method unavailable"}})
 
@@ -110,7 +105,7 @@ async def run(exe, folder, prompt, model, schema, timeout, log, on_text, on_perm
         modes = info.get("modes", {})
         available = {item["id"] for item in modes.get("availableModes", [])}
         current = modes.get("currentModeId")
-        mode = execution_mode(available, auto_edits, preference, current)
+        mode = execution_mode(available, preference, current)
         if available and current != mode and (mode == "default" or mode in available):
             try:
                 await request("session/set_mode", {"sessionId": session, "modeId": mode})
@@ -123,6 +118,8 @@ async def run(exe, folder, prompt, model, schema, timeout, log, on_text, on_perm
         if schema:
             prompt += "\n最后一条回复仅输出符合以下 schema 的 JSON 对象：\n" + json.dumps(schema, ensure_ascii=False)
         result = await request("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": prompt}]})
+        if result.get("stopReason") in ("refusal", "safety", "content_filter"):
+            raise CallFailure("provider_safety", "Gemini 返回内容安全拒绝")
         if result.get("stopReason") != "end_turn":
             raise ValueError("Gemini 未完成本轮：" + str(result.get("stopReason")))
         answer = "".join(chunks).strip()

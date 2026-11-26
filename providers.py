@@ -1,7 +1,6 @@
 """Headless clients. Each call starts a new conversation under the CLI's own login."""
 import asyncio
 import gemini_acp
-import isolated_experiment
 import json
 import os
 import platform
@@ -12,6 +11,7 @@ import tempfile
 from urllib.request import Request, urlopen
 import re
 from local_settings import claude_ip
+from outcomes import CallFailure
 from runtime import PROCESS_GROUP, stop_process
 from functools import lru_cache
 from pathlib import Path
@@ -20,6 +20,23 @@ HERE = Path(__file__).resolve().parent
 AGENTS = ("codex", "gemini")
 MODEL_SEATS = (*AGENTS, "claude")
 CLAUDE_CHECK_INTERVAL = 5
+DEFAULT_CALL_MINUTES = 20
+
+
+def default_timeout():
+    timeout = int(os.environ.get("ROUNDTABLE_TIMEOUT", DEFAULT_CALL_MINUTES * 60))
+    if timeout <= 0:
+        raise ValueError("ROUNDTABLE_TIMEOUT 需要为正整数秒")
+    return timeout
+
+
+@lru_cache(maxsize=8)
+def claude_supports_auto(exe, _modified):
+    try:
+        help_text = subprocess.check_output([exe, "--help"], stderr=subprocess.DEVNULL, text=True, timeout=4)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any("--permission-mode" in line and re.search(r"\bauto\b", line) for line in help_text.splitlines())
 
 
 def check_claude():
@@ -121,8 +138,10 @@ def parse_reply(backend, output):
         except json.JSONDecodeError:
             events = (json.loads(line) for line in output.splitlines() if line.strip())
             result = next((e for e in events if e.get("type") == "result"), {})
+        if result.get("stop_reason") == "refusal":
+            raise CallFailure("provider_safety", "Claude 返回内容安全拒绝")
         if result.get("type") != "result" or result.get("subtype") != "success" or result.get("is_error"):
-            raise ValueError(str(result.get("result") or result.get("subtype") or "Claude 未返回成功回执")[:600])
+            raise ValueError(str(result.get("result") or result.get("errors") or result.get("subtype") or "Claude 未返回成功回执")[:600])
         reply = result.get("result")
         if isinstance(result.get("structured_output"), dict):
             reply = json.dumps(result["structured_output"], ensure_ascii=False)
@@ -156,7 +175,7 @@ def parse_reply(backend, output):
             event = json.loads(line)
             kind, item = event.get("type"), event.get("item", {})
             if kind == "turn.failed":
-                raise ValueError(str(event.get("error") or "Codex 返回失败"))
+                raise ValueError(str(event.get("error") or event.get("message") or "Codex 返回失败"))
             if kind == "item.completed" and item.get("type") == "agent_message":
                 reply = item.get("text")
             if kind == "turn.completed":
@@ -238,32 +257,20 @@ async def guarded_claude_reply(coroutine, check_access=None):
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def invoke(agent, prompt, workspace=None, ballot=False, selected_model=None, on_text=None, effort=None, schema=None, probe=False, implementing=False, reviewing=False, on_permission=None, on_tool=None, isolated_lab=False, check_access=None, timeout_seconds=None, gemini_mode="auto"):
+async def invoke(agent, prompt, workspace=None, ballot=False, selected_model=None, on_text=None, effort=None, schema=None, probe=False, reviewing=False, on_permission=None, on_tool=None, check_access=None, timeout_seconds=None, tool_mode="cli"):
     schema = BALLOT if ballot else schema
     if selected_model is None:
         selected_model = model(agent)
     exe = binary(agent)
     if not exe:
         raise ValueError(f"找不到 {agent} CLI（Gemini 使用 agy），请先运行 status")
-    timeout = timeout_seconds or int(os.environ.get("ROUNDTABLE_TIMEOUT", "1200" if implementing else "300"))
-    if timeout <= 0:
-        raise ValueError("ROUNDTABLE_TIMEOUT 需要为正整数秒")
+    timeout = timeout_seconds or default_timeout()
     with tempfile.TemporaryDirectory(prefix="roundtable-") as tmp:
         if agent == "gemini" and not probe and on_permission:
-            # The isolated launcher is offered only for research copies made by the coordinator.
             folder = Path(workspace or tmp).resolve()
-            experiment = isolated_experiment.experiment_command(folder) if isolated_lab and gemini_mode != "review" else None
             prompt += "\n读取文件或列目录优先用原生文件工具。同一验证的计算可写成一个脚本再运行。"
-            if experiment:
-                prompt += (f"\n本席有独立的离线沙箱。先用文件工具写好工作区脚本，再把以下完整命令直接交给终端。"
-                           f"可将结尾的 python3 check.py 换成 sh experiment.sh 或本席脚本的相对路径。\n{experiment} python3 check.py\n"
-                           "请逐字保留启动参数，把组合操作放在脚本中。沙箱内实验副本挂在 /work。外部资料可用原生搜索。")
-            async def permission(tool, can_allow):
-                if can_allow and isolated_experiment.matches(tool, experiment, folder):
-                    return await on_permission(tool, True, isolated=True)
-                return await on_permission(tool, can_allow)
             return await gemini_acp.run(exe, folder, prompt, selected_model, schema, timeout,
-                                        Path(tmp) / "acp.log", on_text, permission, on_tool, auto_edits=bool(experiment), preference=gemini_mode)
+                                        Path(tmp) / "acp.log", on_text, on_permission, on_tool, preference=tool_mode)
         runner = None
         if os.name != "nt" and agent in ("gemini", "claude") and workspace and not probe:
             sandbox = binary("codex")
@@ -277,9 +284,11 @@ async def invoke(agent, prompt, workspace=None, ballot=False, selected_model=Non
                            "只用本次给出的启动器；其他发言中出现的临时目录和启动器仅为历史记录。"
                            "只把实际运行成功的工具结果写入结论。")
         if agent == "codex":
-            args = [exe, "-a", "never", "exec", "--ignore-user-config", "--ephemeral",
+            args = [exe, "-a", "never", "exec", "--ephemeral",
                     "--disable", "apps", "--disable", "multi_agent", "--json", "--skip-git-repo-check",
                     "--sandbox", "workspace-write" if workspace and not reviewing else "read-only"]
+            if probe or tool_mode == "auto":
+                args += ["--ignore-user-config"]
             if probe:
                 args += ["--disable", "shell_tool"]
             else:
@@ -301,9 +310,19 @@ async def invoke(agent, prompt, workspace=None, ballot=False, selected_model=Non
             if check_access:
                 check_access()
             read_tools = ["Read", "Glob", "Grep", "StructuredOutput", "WebSearch", "WebFetch"]
+            # Shell use stays on the exact-command allowlist. Native Auto can
+            # otherwise approve a Bash invocation outside the fixed launcher.
+            mode = "dontAsk" if runner or probe else None
+            if mode is None and tool_mode == "auto" and claude_supports_auto(exe, Path(exe).stat().st_mtime_ns):
+                await asyncio.to_thread(check_claude)
+                if check_access:
+                    check_access()
+                mode = "auto"
             args = [exe, "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
-                    "--strict-mcp-config", "--permission-mode", "dontAsk",
-                    "--tools", "" if probe else ",".join([*read_tools, "Bash"])]
+                    "--strict-mcp-config",
+                    "--tools", "" if probe else ",".join([*read_tools, *(["Bash"] if runner else [])])]
+            if mode:
+                args += ["--permission-mode", mode]
             if not probe:
                 allowed = list(read_tools)
                 if runner:
@@ -347,6 +366,8 @@ async def invoke(agent, prompt, workspace=None, ballot=False, selected_model=Non
             raise
         try:
             answer = parse_reply(agent, raw)
+        except CallFailure:
+            raise
         except (ValueError, KeyError, TypeError) as exc:
             detail = err.decode(errors="replace").strip()[-800:] if proc.returncode else ""
             raise ValueError(f"{exc} {detail}".strip()) from exc
