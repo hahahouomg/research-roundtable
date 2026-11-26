@@ -139,6 +139,7 @@ async function refresh(){
   pollAgain(data.running.length || data.selected?.calls.some(c=>!c.ended)?1200:5000);
 }
 async function navigate(p,id){
+  stopReplay();
   saveDraft();
   if(p!==project || id!==sid)$("moderator").value="";
   clearTimeout(poll);serial++;project=p;sid=id;detailOpen=false;closeNav();
@@ -153,7 +154,31 @@ function prose(text){
   return String(text || "").split(/^```[^\n]*$/m).map((block,i)=>{
     if(i%2)return "<pre>"+esc(block.trim())+"</pre>";
     let list="",html="";
-    for(const line of block.split("\n")){
+    const lines=block.split("\n");
+    const cells=line=>line.trim().replace(/^\||\|$/g,"").split(/(?<!\\)\|/).map(v=>v.trim().replace(/\\\|/g,"|"));
+    for(let n=0;n<lines.length;n++){
+      const line=lines[n];
+      const separator=lines[n+1];
+      if(line.includes("|") && separator?.includes("|") && cells(separator).every(c=>/^:?-{3,}:?$/.test(c))){
+        if(list){html+="</"+list+">";list="";}
+        const row=(values,tag)=>"<tr>"+values.map(v=>"<"+tag+">"+inline(v)+"</"+tag+">").join("")+"</tr>";
+        html+='<div class="table-scroll"><table><thead>'+row(cells(line),"th")+"</thead><tbody>";
+        n++;
+        while(lines[n+1]?.includes("|"))html+=row(cells(lines[++n]),"td");
+        html+="</tbody></table></div>";
+        continue;
+      }
+      if(/^>\s?/.test(line)){
+        if(list){html+="</"+list+">";list="";}
+        const quoted=[line];
+        while(/^>/.test(lines[n+1]||""))quoted.push(lines[++n]);
+        html+="<blockquote>"+quoted.map(q=>inline(q.replace(/^>\s?/,""))).join("<br>")+"</blockquote>";
+        continue;
+      }
+      if(/^\s*(?:-{3,}|_{3,}|\*{3,})\s*$/.test(line)){
+        if(list){html+="</"+list+">";list="";}
+        html+="<hr>";continue;
+      }
       const item=line.match(/^\s*(?:([-*+])|(\d+)[.)])\s+(.+)$/);
       const next=item?(item[2]?"ol":"ul"):"";
       if(next!==list){
@@ -267,7 +292,7 @@ const failureLabels={
 const evidenceKinds={
   observation:"报告的观测",reference:"参考来源",inference:"推断",untested:"尚未验证"
 };
-function evidenceCard(review){
+function evidenceCard(review,record){
   const votes=Object.values(review.votes), accepted=votes.filter(v=>v==="accept").length;
   const objections=votes.length-accepted, remaining=review.items.filter(item=>item.blocking && !item.response).length;
   const status = [
@@ -285,7 +310,7 @@ function evidenceCard(review){
       (item.blocking && !item.response?'<small>'+t("待主持人回应")+'</small>':'')+'</li>';
   }).join("");
   return '<details class="review-card" data-key="evidence"><summary>'+t("评议与表决")+
-    (status?'<small>'+esc(status)+'</small>':'')+'</summary><p class="hint">'+t("评议者报告 · 未由圆桌独立核实")+'</p>'+
+    (status?'<small>'+esc(status)+'</small>':'')+'</summary>'+voteHistory(record)+'<p class="hint">'+t("评议者报告 · 未由圆桌独立核实")+'</p>'+
     (items?'<ul class="evidence-list">'+items+'</ul>':'<p class="hint">'+t("暂无带编号的发现。")+'</p>')+
     (review.original.length?'<p class="hint">'+t("评议原文见发言记录")+' · '+review.original.map(agent=>esc(labels[agent])).join(", ")+'</p>':'')+
     '</details>';
@@ -309,15 +334,7 @@ function patchCard(s){
 }
 function renderDiscussion(s){
   const calls=s.calls;
-  const lastReply=stage=>calls.filter(c=>c.stage===stage && c.reply).slice(-1)[0]?.reply;
-  const reports=calls.filter(c=>["实施","集成复核"].includes(c.stage) && c.reply).map(c=>{
-    let report=c.reply;
-    try{report=JSON.parse(c.reply).report||report;}catch{}
-    return labels[c.agent]+" · "+displayStage(c.stage)+" · "+report;
-  });
-  const draft=finalDraft(s), summary=closingDraft(s);
-  const result=reports.length?reports.join("\n\n"):summary||draft||s.plan||lastReply("单聊");
-  const resultLabel=reports.length?t("实施报告"):summary?t("讨论总结"):draft?t("最终方案 · Gemini 执笔"):s.state==="consensus"?t("共识方案"):s.plan?t("候选方案"):t("回复");
+  const draft=finalDraft(s), summary=closingDraft(s), documents=sessionDocuments(s);
   const failures=calls.filter((c,i)=>c.error && !calls.slice(i+1).some(n=>n.stage===c.stage && n.agent===c.agent && n.ended && !n.error));
   const lastStage=calls[calls.length-1]?.stage;
   const totals=calls.map(c=>JSON.parse(c.usage||"{}").total).filter(Number.isFinite);
@@ -336,9 +353,9 @@ function renderDiscussion(s){
     const expanded=document.querySelector('[data-request-detail="'+request.id+'"]')?.open;
     html+=permissionCard(request,expanded);
   }
-  if(s.review)html+=evidenceCard(s.review);
+  html+=stageMap(s);
   if(s.input_change)html+=inputsCard(s.input_change);
-  if(concise!==s.topic)html+=('<details class="original" data-key="source-topic"><summary>'+t("原始议题")+'</summary><p class="prose">')+esc(s.topic)+'</p></details>';
+  const originalTopic=concise!==s.topic?('<details class="original" data-key="source-topic"><summary>'+t("原始议题")+'</summary><p class="prose">')+esc(s.topic)+'</p></details>':"";
   if(busy || s.state==="stopped"){
     if(s.state==="stopped")html+='<p class="hint stopnote">'+(s.workspace?t(s.implementation_preview?"预览已停止，已收到的实施报告仍保留。":"实施已停止，请核对目录中已经写入的文件。"):t('本轮已停止。已收到的发言保存在下方，可以继续追问。'))+'</p>';
     const live=calls.filter(c=>c.stage===lastStage);
@@ -347,15 +364,18 @@ function renderDiscussion(s){
       const waiting=!c.ended&&!c.reply, status=approval?t('待你确认'):c.error?t('已中断'):c.ended?t('已发言'):c.reply?t('发言中'):t('等待发言');
       const reply=c.stage.startsWith("表决")?ballot(c.reply):c.reply;
       return '<article data-key="live-'+c.id+'" class="livecard '+(waiting?'waiting':'')+'"><div class="callhead">'+glyph(c.agent)+'<b>'+labels[c.agent]+'</b><small>'+status+'</small></div>'+
-        (reply?'<div class="prose">'+prose(reply)+'</div>':'<div class="waitline" aria-hidden="true"></div>')+'</article>';
+        (reply?'<div class="prose">'+prose(reply.slice(0,520))+'</div>'+(reply.length>520?'<button class="quiet" data-read="call-'+c.id+'">'+t("阅读全文")+'</button>':''):'<div class="waitline" aria-hidden="true"></div>')+'</article>';
     }).join("")+'</div>';
   }
   if(s.workspace)html+='<p class="hint">'+t(s.implementation_preview?"预览目标 ·":"实施目录 ·")+' '+esc(s.workspace)+'</p>';
   if(s.implementation_preview && !busy)html+=patchCard(s);
+  if(documents.length)html+=documentCard(documents[0]);
+  if(!busy)html+='<div class="record-tools" data-key="record-tools">';
   if((summary||s.plan) && !busy)html+='<button class="quiet" id="exportPlan">'+t(summary?"下载讨论总结":["disputed","closed","incomplete"].includes(s.state)?"下载候选方案":"下载方案")+'</button>';
   if(draft && !busy)html+='<button class="quiet" id="exportPDF">'+(s.has_pdf?t('下载图文 PDF'):t('请 Gemini 排版 PDF'))+'</button>';
   if(!busy)html+='<button class="quiet" id="discussionFolder">'+icon("folder")+(' '+t("记录文件夹")+'</button>');
   if(calls.length && !busy)html+=('<button class="quiet" id="exportRecord">'+t("下载讨论记录")+'</button>');
+  if(!busy)html+='</div>';
   if(s.parent)html+='<button class="quiet" data-session="'+esc(s.parent)+('">'+t("← 上一轮讨论")+'</button>');
   if(s.state==="closed" || s.state==="summarizing")html+=('<p class="summary-note">'+t("本轮未达成共识。原始提案、异议与表决已保留。")+'</p>');
   if(s.state==="disputed"){
@@ -364,9 +384,9 @@ function renderDiscussion(s){
       ('<div class="discussion-actions"><button id="continueDispute" class="primary">'+t("带着分歧继续讨论")+'</button>')+
       ('<button id="closeDiscussion" class="quiet">'+t("结束并请 Gemini 总结")+'</button></div></section>');
   }
-  if(result)html+='<article class="result" data-key="result"><h3>'+resultLabel+'</h3><div class="prose">'+prose(result)+'</div></article>';
-  if(draft)html+=('<details data-key="approved-plan"><summary>'+t("全体表决通过的原稿及分工")+'</summary><div class="prose">')+prose(s.plan)+'</div></details>';
-  if(summary && s.plan)html+=('<details data-key="last-candidate"><summary>'+t("最后一版候选方案")+'</summary><div class="prose">')+prose(s.plan)+'</div></details>';
+  html+=documents.slice(1).map(docRow).join("");
+  if(s.review)html+=evidenceCard(s.review,s);
+  html+=originalTopic;
   if(s.state==="closed" && !summary)html+=('<button id="closeDiscussion" class="quiet">'+t("重试 Gemini 总结")+'</button>');
   if(s.notice)html+='<p class="hint">'+esc(s.notice)+'</p>';
   if(s.failure && !s.input_change && (s.state!=="incomplete" || !failures.length))html+='<p class="formerror">'+esc(displayError(s.failure))+'</p>';
@@ -386,7 +406,9 @@ function renderDiscussion(s){
   if(s.state==="consensus")html+=('<div class="discussion-actions"><button id="implement" class="primary">'+t("按分工实施")+' ')+icon("arrow")+'</button></div>';
   if(calls.length)html+='<details id="transcript"'+(detailOpen?' open':'')+'><summary>'+esc(t("逐轮发言 · {count} 次调用 · {usage}",{count:calls.length,usage:used}))+'</summary>'+(detailOpen?calls.map(c=>{
     const tokens=JSON.parse(c.usage||"{}").total, reply=c.stage.startsWith("表决")?ballot(c.reply):c.reply;
-    return '<article data-key="call-'+c.id+'" class="call"><div class="callhead"><b>'+esc(labels[c.agent])+'</b>'+esc(displayStage(c.stage))+'<small>'+esc([c.model,c.effort].filter(Boolean).join(" · "))+(tokens==null?"":" · "+num(tokens)+" tokens")+'</small></div><div class="prose">'+prose((c.error?displayError(c.error)+'\n':'')+(reply||(c.ended?t("无回复"):t("等待回复…"))))+'</div></article>';
+    const raw=(c.error?displayError(c.error)+'\n':'')+(reply||(c.ended?t("无回复"):t("等待回复…")));
+    const more=raw.length>480 ? '<button class="quiet" data-read="call-'+Number(c.id)+'">'+t("阅读完整发言")+' '+icon("arrow")+'</button>' : "";
+    return '<article data-key="call-'+c.id+'" class="call"><div class="callhead"><b>'+esc(labels[c.agent])+'</b>'+esc(displayStage(c.stage))+'<small>'+esc([c.model,c.effort].filter(Boolean).join(" · "))+(tokens==null?"":" · "+num(tokens)+" tokens")+'</small></div><div class="prose">'+prose(raw.length>480?raw.slice(0,480)+'…':raw)+'</div>'+more+'</article>';
   }).join(""):"")+'</details>';
   const loadedPatch=$("inspectPatch")?.querySelector("pre")?.textContent;
   const target=$("conversation"), template=document.createElement("template");
@@ -394,6 +416,7 @@ function renderDiscussion(s){
   if(loadedPatch && shownDiscussion===s.id && s.has_patch)template.content.querySelector("#inspectPatch pre").textContent=loadedPatch;
   if(shownDiscussion!==s.id)target.replaceChildren(template.content);
   else patchChildren(target,template.content);
+  if($("phaseSelect"))$("phaseSelect").onchange=e=>inspectPhase(e.target.value);
   const patch=$("inspectPatch");
   if(patch){patch.ontoggle=async()=>{
     const pre=patch.querySelector("pre");
@@ -405,6 +428,7 @@ function renderDiscussion(s){
     }catch(ex){error(ex);}
     finally{delete pre.dataset.busy;}
   };}
+  if($("reader").open && readerSession!==s.id)$("reader").close();
   const tr=$("transcript");if(tr)tr.ontoggle=()=>{
     if(tr.isConnected && detailOpen!==tr.open){detailOpen=tr.open;renderDiscussion(s);}
   };
@@ -926,6 +950,13 @@ function runDialog(){
 document.addEventListener("click",async e=>{
   const b=e.target.closest("button");if(!b)return;
   try{
+    if(b.id==="playStages"){
+      if(replayTimer){stopReplay();renderDiscussion(data.selected);}
+      else playStages(data.selected);
+      return;
+    }
+    if(b.hasAttribute("data-phase-index")){inspectPhase(b.dataset.phaseIndex);return;}
+    if(b.dataset.read){openReader(b.dataset.read,b);return;}
     if(b.dataset.permission){
       b.dataset.busy="true"; b.disabled=true; b.textContent=t("正在提交…");
       try{await api("permission",{project,session:sid,request:b.dataset.permission,decision:b.dataset.choice});}
@@ -995,6 +1026,29 @@ document.addEventListener("click",async e=>{
     if(b.id==="implement")runDialog();
   }catch(ex){error(ex);}
 });
+$("readerClose").onclick=()=>$("reader").close();
+$("reader").onclose=()=>{
+  if(data?.selected?.id===readerSession){
+    readerTrigger?.focus({preventScroll:true});
+    $("stage").scrollTop=returnScroll;
+  }
+  $("readerText").replaceChildren();
+  $("readerNav").replaceChildren();
+  readerSections=[];
+};
+$("readerNav").onclick=e=>{
+  const chapter=e.target.closest("button");
+  if(chapter)jumpChapter(Number(chapter.dataset.chapter));
+};
+$("readerDocs").onchange=e=>openReader(e.target.value,readerTrigger);
+$("readerOutline").onchange=e=>jumpChapter(Number(e.target.value));
+let readingFrame=0;
+$("readerScroll").onscroll=()=>{
+  if(!readingFrame)readingFrame=requestAnimationFrame(()=>{
+    readingFrame=0;
+    if($("reader").open)updateReading();
+  });
+};
 $("composer").onsubmit=async e=>{
   e.preventDefault();const topic=$("topic").value.trim();if(!topic||pending||!data||ongoing(data.selected?.state))return;
   if($("mode").value==="claude" && !data.seats.some(s=>s.agent==="claude")){
@@ -1015,7 +1069,7 @@ $("language").onchange=e=>{
   if(data){lastRenderRecord=null;render();}
 };
 $("reconnect").onclick=()=>refresh().catch(error);
-document.addEventListener("visibilitychange",()=>{if(document.hidden)clearTimeout(poll);else refresh().catch(error);});
+document.addEventListener("visibilitychange",()=>{if(document.hidden){clearTimeout(poll);stopReplay();}else refresh().then(()=>{if(data?.selected)renderDiscussion(data.selected);}).catch(error);});
 $("settings").onclick=()=>projectDialog(false);$("add").onclick=()=>projectDialog(true);$("health").onclick=()=>health();
 $("menu").onclick=()=>{document.body.classList.add("navopen");$("closeNav").focus();};$("closeNav").onclick=closeNav;$("scrim").onclick=closeNav;
 document.addEventListener("keydown",e=>{if(e.key==="Escape")closeNav();});

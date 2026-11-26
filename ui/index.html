@@ -9,6 +9,7 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
   <script defer src="/i18n.js"></script>
+  <script defer src="/discussion.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
@@ -107,6 +108,19 @@
       </div>
     </main>
   </div>
+  <dialog id="reader" aria-labelledby="readerTitle">
+    <div class="reader-bar">
+      <h2 id="readerTitle"></h2>
+      <select id="readerDocs" aria-label="切换文稿" data-i18n-aria-label="切换文稿"></select>
+      <button id="readerClose" type="button"><span aria-hidden="true">↩</span><span data-i18n="返回讨论">返回讨论</span></button>
+    </div>
+    <progress id="readerProgress" max="100" value="0" aria-label="阅读进度" data-i18n-aria-label="阅读进度"></progress>
+    <label id="readerOutlineLabel"><span data-i18n="目录">目录</span><select id="readerOutline"></select></label>
+    <div class="reader-layout">
+      <nav id="readerNav" aria-label="目录" data-i18n-aria-label="目录"></nav>
+      <div id="readerScroll" tabindex="0"><article id="readerText" class="prose"></article></div>
+    </div>
+  </dialog>
   <dialog id="modal" aria-labelledby="modalTitle">
     <div class="dialoghead">
       <h2 id="modalTitle"></h2>

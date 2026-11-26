@@ -1733,7 +1733,7 @@ summary::-webkit-details-marker {
   display: none;
 }
 
-summary::after {
+summary::after, .doc-row::after {
   content: "";
   width: 7px;
   height: 7px;
@@ -3213,3 +3213,202 @@ button,
   .language { min-height: 40px; }
   .header-actions { gap: 5px; }
 }
+
+/* Discussion replay. The seat anchors use the same 420 × 200 plane as the table. */
+.reading .content { width: min(100%, 1050px); }
+.forum {
+  color-scheme: dark;
+  background: #162f33;
+  color: #f0f3e9;
+  border: 1px solid #345356;
+  border-radius: 15px;
+  margin: 16px 0;
+  padding: 16px clamp(16px, 2.2vw, 26px) 8px;
+  overflow: hidden;
+}
+.forum-top, .forum-foot, .forum-top h2, .forum-count,
+.record-tools, .read-document, .doc-byline, .reader-bar, #readerClose {
+  display: flex;
+  align-items: center;
+}
+.forum-top { justify-content: space-between; gap: 16px; }
+.forum-top h2 { gap: 10px; margin: 0; color: #d8e8e2; font-size: 14px; font-weight: 620; }
+.forum-mark {
+  width: 21px; height: 13px; border: 1.5px solid #b8d9cb;
+  border-radius: 50%; position: relative; transform: rotate(-22deg);
+}
+.forum-mark::after { content: ""; position: absolute; inset: 2px -2px -3px 1px; border-radius: 50%; border: 1px solid #8db3ae; }
+.forum-top b { color: #e7efe6; }
+.forum-body { display: grid; grid-template-columns: minmax(160px,.8fr) minmax(230px,1.25fr); align-items: center; min-width: 0; }
+.forum-caption { padding: 12px 0 16px; }
+.forum-caption h3 { font: 600 clamp(20px,2vw,28px)/1.3 var(--font-serif); margin: 0 0 13px; color: inherit; }
+.forum-count { gap: 8px; margin: 0; align-items: baseline; font: 400 18px/1 var(--font-serif); color: #b6c9c4; font-variant-numeric: tabular-nums; }
+.forum-count b { color: #d8efb9; font: 400 clamp(34px,4vw,49px)/1 Georgia,serif; }
+.forum-measure { color: #c1d1cd; font-size: 12px; margin: 6px 0 0; }
+.map-art { position: relative; width: 100%; max-width: 480px; aspect-ratio: 420/200; justify-self: center; }
+.map-art > svg { display: block; width: 100%; height: 100%; }
+.map-trace { stroke-width: 1.7px; stroke-dasharray: 4 3; }
+.map-review-edge { stroke: #d7ca97; stroke-dasharray: 2 3; opacity: .8; }
+.map-seat {
+  position: absolute; transform: translate(-50%, -16px); display: grid; justify-items: center; gap: 2px;
+  padding: 0; background: transparent; border: 0; border-radius: 8px; color: #f0f5ee;
+}
+.map-seat.slot-0 { left: 21.9%; top: 50%; }
+.map-seat.slot-1 { left: 78.1%; top: 50%; }
+.seats-3 .slot-0, .seats-3 .slot-2 { top: 63.5%; }
+.seats-3 .slot-1 { left: 50%; top: 27%; }
+.seats-3 .slot-2 { left: 78.1%; }
+.map-token { display: grid; place-items: center; width: 35px; height: 35px; border-radius: 50%; border: 1px solid #b3cec1; background: #234841; box-shadow: 0 3px 0 #102b27; }
+.map-seat.gemini .map-token { background: #49415c; border-color: #c4b7d8; }
+.map-seat.claude .map-token { background: #603f2a; border-color: #d0b293; }
+.map-seat .glyph { background: none; color: #edf4e6; font-size: 18px; }
+.map-seat:disabled { opacity: .72; }
+.map-label { border-radius: 4px; padding: 2px 5px; background: #173034; font: 600 12px/1.35 var(--font-sans); }
+.map-label small { display: block; color: #c4d6d0; font-size: 10px; font-weight: 500; }
+.map-seat:hover:not(:disabled) .map-token, .map-seat:focus-visible .map-token { transform: translateY(-3px); border-color: white; }
+.map-token { transition: transform var(--motion-content) var(--motion-ease); }
+.forum-foot { gap: 8px; border-top: 1px solid #385156; min-height: 40px; }
+.phase-track { display: flex; min-width: 0; flex: 1; gap: 3px; overflow-x: auto; }
+.phase-track button { background: none; flex: 1 0 10px; min-width: 0; padding: 0; height: 33px; border: 0; display: grid; align-items: center; }
+.phase-track i { width: 100%; height: 3px; border-radius: 2px; background: #4d6668; transition: background var(--motion-feedback); }
+.phase-track .passed i { background: #87a9a0; }
+.phase-track [aria-pressed=true] i { background: #d8efb9; height: 5px; }
+.phase-track button:hover i { background: #e5f0dc; }
+.map-step { background: transparent; color: #f2f7ed; font: 23px/1 Georgia,serif; width: 32px; height: 34px; border: 0; border-radius: 6px; }
+.map-step:disabled { opacity: .32; }
+.map-step:hover:not(:disabled) { background: #2d4d50; }
+.forum :focus-visible { outline-color: #dbedbe; outline-offset: -1px; }
+
+.document-cover {
+  margin: 16px 0 10px; padding: clamp(18px,3vw,32px); border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface); position: relative;
+}
+.doc-byline { gap: 8px; font-size: 12px; font-weight: 640; color: var(--accent); margin-bottom: 12px; }
+.document-cover h2 { font: 650 clamp(20px,2.2vw,28px)/1.45 var(--font-serif); max-width: 36em; margin: 0 0 8px; color: var(--ink); overflow-wrap: anywhere; }
+.document-cover p { font-size: 14px; line-height: 1.8; color: var(--soft); margin: 0 0 14px; max-width: 65em; overflow-wrap: anywhere; }
+.read-document { width: fit-content; gap: 9px; background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 7px; padding: 9px 14px; font-weight: 620; }
+.read-document:hover { background: var(--accent-hover); }
+.record-tools { flex-wrap: wrap; gap: 8px; margin: 10px 0 15px; }
+.record-tools .quiet {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 38px;
+  margin: 0; padding: 0 13px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+  color: var(--ink-body); font-size: 13px; font-weight: 580; line-height: 1;
+}
+.record-tools .quiet:hover:not(:disabled) { background: var(--tint-soft); }
+#conversation { --row-inset: 18px; }
+#conversation > .review-card { padding: 0; }
+.review-card > :is(.hint,ul) { margin-inline: var(--row-inset); }
+#conversation > details > summary, .doc-row {
+  display: flex; min-height: 50px; align-items: center; gap: 10px; padding: 12px var(--row-inset);
+  color: var(--ink); font-size: 14px; font-weight: 640; text-align: start;
+}
+#conversation > details > summary::after, .doc-row::after { margin-inline-start: auto; }
+#conversation > .review-card summary small { margin-inline-start: auto; font-size: 12px; font-weight: 500; }
+#conversation > .review-card summary:has(small)::after { margin-inline-start: 0; }
+.doc-row { width: 100%; margin-top: 14px; justify-content: space-between; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.doc-row:hover { background: var(--surface-subtle); }
+#conversation > details[open] { overflow: clip; }
+#conversation > details[open] > summary { position: sticky; top: 0; z-index: 2; }
+#reader {
+  width: min(1120px,96vw); max-width: none; height: min(840px,92dvh); max-height: none;
+  padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--surface); color: var(--ink); box-shadow: var(--shadow-dialog);
+}
+#reader[open] { display: flex; flex-direction: column; }
+.reader-bar { gap: 12px; flex: none; min-height: 62px; padding: 10px 18px; }
+.reader-bar h2 { flex: 1; font: 650 16px/1.4 var(--font-sans); margin: 0; min-width: 0; }
+.reader-bar select, #readerOutline { max-width: 42%; background: var(--paper); color: var(--ink); padding: 6px; border-radius: 6px; border: 1px solid var(--line); }
+#readerClose { flex: none; gap: 6px; padding: 7px 11px; border-radius: 7px; color: var(--ink); background: var(--surface-subtle); border: 1px solid var(--line); }
+#readerProgress { appearance: none; border: 0; flex: none; width: 100%; height: 3px; color: var(--green); background: var(--line-soft); }
+#readerProgress::-webkit-progress-bar { background: var(--line-soft); }
+#readerProgress::-webkit-progress-value { background: var(--green); }
+#readerProgress::-moz-progress-bar { background: var(--green); }
+.reader-layout { display: flex; overflow: hidden; min-height: 0; flex: 1; }
+#readerNav { position: relative; flex: 0 0 23%; overflow-y: auto; padding: 14px 9px; background: var(--paper); border-inline-end: 1px solid var(--line); }
+#readerNav button { display: block; width: 100%; padding: 7px 10px; text-align: start; border: 0; border-radius: 5px; color: var(--ink-body); background: transparent; font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+#readerNav button.nested { padding-inline-start: 20px; color: var(--soft); }
+#readerNav button[aria-current], #readerNav button:hover { background: var(--surface-hover); color: var(--ink); }
+#readerNav button[aria-current] { font-weight: 650; }
+#readerScroll { min-width: 0; flex: 1; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+#readerText { margin: auto; max-width: 790px; padding: 30px clamp(20px,4vw,60px) 60px; line-height: 1.85; overflow-wrap: anywhere; }
+#readerText > :first-child { margin-top: 0; }
+#readerText h4, #readerText h5 { scroll-margin-block-start: 20px; }
+#readerText h4 { font: 650 clamp(19px,2.2vw,26px)/1.5 var(--font-serif); margin: 1.65em 0 .55em; }
+#readerText blockquote { border-inline-start: 3px solid var(--accent-line); padding: 4px 14px; margin: 1em 0; color: var(--soft); }
+.prose .table-scroll { overflow-x: auto; margin-block: 1em; }
+.prose table { width: 100%; font-size: .92em; border-collapse: collapse; text-align: start; }
+.prose th, .prose td { min-width: 6em; padding: 8px 11px; border: 1px solid var(--line); text-align: start; vertical-align: top; }
+.prose th { background: var(--paper); }
+#readerOutlineLabel { display: none; }
+@media (max-width: 670px) {
+  #reader { width: 100%; height: 100dvh; border-radius: 0; border: 0; }
+  .reader-bar { flex-wrap: wrap; gap: 6px 8px; padding: 9px 12px; }
+  .reader-bar h2 { font-size: 14px; }
+  #readerDocs:not([hidden]) { order: 1; width: 100%; max-width: 100%; }
+  #readerNav { display: none; }
+  #readerOutlineLabel:not([hidden]) { display: flex; align-items: center; gap: 12px; padding: 8px 12px; margin: 0; background: var(--paper); }
+  #readerOutline { min-width: 0; max-width: none; flex: 1; }
+  #readerText { padding: 20px 18px 44px; }
+}
+@media (max-width: 500px) {
+  #conversation { --row-inset: 13px; }
+  .forum { padding: 12px 12px 4px; }
+  .forum-body { grid-template-columns: 1fr; }
+  .forum-caption { display: flex; align-items: baseline; gap: 6px; padding: 13px 0 0; }
+  .forum-caption h3 { flex: 1; font-size: 20px; margin: 0; }
+  .forum-count b { font-size: 25px; }
+  .forum-count { font-size: 15px; gap: 3px; }
+  .forum-measure { margin: 0; font-size: 11px; }
+  .map-art { max-width: 340px; }
+  .record-tools { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .record-tools .quiet { height: auto; min-height: 40px; padding: 4px; line-height: 1.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-token, .phase-track i { transition: none; }
+}
+#playStages {
+  flex: none; width: 32px; height: 32px; border: 1px solid #527074; border-radius: 50%;
+  background: transparent; color: #e0edd5; font-size: 12px;
+}
+#playStages:hover { background: #355359; }
+.ballot-history { margin: 12px var(--row-inset); overflow-x: auto; }
+.ballot-history table { width: 100%; border-collapse: collapse; color: var(--ink-body); }
+.ballot-history caption { text-align: start; font-size: 14px; font-weight: 650; padding-block: 7px; }
+.ballot-history th, .ballot-history td { padding: 7px 4px; font-size: 12px; text-align: center; border-bottom: 1px solid var(--line-soft); }
+.ballot-history th:first-child { text-align: start; }
+.ballot-mark { border: 1px solid var(--line); background: var(--paper); color: var(--soft); border-radius: 6px; font-size: 12px; white-space: nowrap; padding: 4px 8px; }
+.ballot-mark.accept { color: var(--green); background: var(--green-tint); border-color: var(--green-line); }
+.ballot-mark.object { color: var(--warn); background: var(--warn-tint); border-color: var(--warn-line); }
+.seats-3 .slot-1 .map-label { position: absolute; left: calc(100% + 3px); top: 2px; text-align: start; }
+.stage-glimpse {
+  display: flex; align-items: center; text-align: start; gap: 7px; max-width: 100%; margin: 12px 0 0; padding: 4px 0;
+  color: #cfdfd9; background: none; border: 0; font-size: 12px; line-height: 1.6;
+}
+.stage-glimpse b { color: #f1f3e6; }
+.stage-glimpse span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.stage-glimpse .ic { width: 14px; flex: none; }
+.stage-glimpse:hover span { text-decoration: underline; text-underline-offset: 3px; }
+.document-cover:has(.cover-chapters) { display: grid; grid-template-columns: minmax(0,1.65fr) minmax(185px,1fr); align-items: center; gap: 24px; }
+.cover-chapters { border-inline-start: 1px solid var(--line); padding-inline-start: 20px; }
+.cover-chapters h3 { margin: 0 0 7px; font-size: 12px; color: var(--soft); font-weight: 600; }
+.cover-chapters button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 34px; padding: 5px 0; text-align: start; border: 0; border-bottom: 1px solid var(--line-soft); font-size: 13px; color: var(--ink); background: transparent; }
+.cover-chapters button span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.cover-chapters .ic { flex: none; width: 14px; }
+.cover-chapters button:hover { color: var(--accent); }
+@media (prefers-reduced-motion: no-preference) {
+  .map-trace { animation: trace-phase 800ms ease-out both; }
+  @keyframes trace-phase { from { stroke-dashoffset: 17; opacity: .35; } to { stroke-dashoffset: 0; opacity: 1; } }
+}
+@media (max-width: 670px) {
+  .document-cover:has(.cover-chapters) { display: block; }
+  .cover-chapters { margin-top: 14px; border-inline-start: 0; border-top: 1px solid var(--line); padding: 12px 0 0; }
+}
+@media (max-width: 500px) {
+  .forum-caption { flex-wrap: wrap; }
+  .stage-glimpse { flex-basis: 100%; margin: 0; }
+  .stage-glimpse span { -webkit-line-clamp: 1; }
+}
+.phase-select { position: relative; display: inline-flex; align-items: center; min-height: 30px; margin: 0; padding: 3px 8px; border: 1px solid #4b6667; border-radius: 6px; color: #d8e7de; font: 11px var(--font-mono); }
+.phase-select select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.phase-select:focus-within { outline: 2px solid #d8efb9; }
+.phase-select option { background: #20373b; color: #f3f5eb; }

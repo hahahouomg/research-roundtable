@@ -28,7 +28,7 @@ from outcomes import failure_kind
 from providers import MODEL_SEATS, binary, default_timeout, model_options
 
 ASSETS = Path(__file__).resolve().parent / "ui"
-FILES = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
+FILES = {"/discussion.js": ("discussion.js", "text/javascript"), "/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
          "/style.css": ("style.css", "text/css"), "/i18n.js": ("i18n.js", "text/javascript")}
 
 
@@ -62,6 +62,7 @@ def state(db, project, sid=None):
         record = rt.session(db, sid, project)
         selected = {k: record[k] for k in ("id", "topic", "parent", "state", "plan", "workspace", "started", "stop_requested", "failure")}
         settings = json.loads(record["settings"] or "{}")
+        selected["seat_names"] = list(settings.get("models") or {}) if settings.get("mode", "both") == "both" else []
         selected["notice"] = settings.get("notice")
         selected["input_change"] = settings.get("input_change")
         selected["implementation_preview"] = bool(settings.get("implementation_preview"))
