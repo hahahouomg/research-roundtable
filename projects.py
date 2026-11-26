@@ -1,16 +1,13 @@
 """Project workspaces and their model preferences, stored alongside discussion history."""
-import os
 from pathlib import Path
 
-from providers import AGENTS, catalog, model
+from local_settings import claude_ip, data_dir, set_claude_ip
+from record_store import project_folder
+from providers import AGENTS, MODEL_SEATS, model, model_options, check_claude
 
 DEFAULT = "默认"
 PROJECT_HELP = "project list | project add 名称 [目录] | project use 名称 | project path 目录"
-MODEL_HELP = "model | model codex | model gemini | model list 席位 | model set 席位 型号或default"
-
-
-def data_dir():
-    return Path(os.environ.get("ROUNDTABLE_HOME", Path(__file__).resolve().parent / "data")).expanduser().resolve()
+MODEL_HELP = "model | model 席位 | model list 席位 | model set 席位 型号或default [思考强度] | model claude on/off | model claude ip IPv4"
 
 
 def setup(db):
@@ -26,16 +23,32 @@ def setup(db):
         if "model" not in {r["name"] for r in db.execute("PRAGMA table_info(calls)")}:
             db.execute("ALTER TABLE calls ADD COLUMN model TEXT")
         for table, column, definition in (
+            ("projects", "codex_effort", "TEXT"),
+            ("projects", "gemini_auto_lab", "INTEGER NOT NULL DEFAULT 0"),
+            ("projects", "gemini_mode", "TEXT NOT NULL DEFAULT 'auto'"),
+            ("projects", "call_minutes", "INTEGER"),
+            ("projects", "claude", "TEXT"),
+            ("projects", "claude_effort", "TEXT"),
+            ("projects", "claude_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("projects", "claude_epoch", "INTEGER NOT NULL DEFAULT 0"),
+            ("sessions", "folder_ready", "INTEGER NOT NULL DEFAULT 0"),
+            ("sessions", "failure", "TEXT"),
+            ("sessions", "settings", "TEXT"),
+            ("sessions", "assignments", "TEXT"),
+            ("calls", "effort", "TEXT"),
+            ("calls", "owner", "INTEGER"),
             ("projects", "trashed", "INTEGER DEFAULT 0"),
             ("sessions", "trash_root", "TEXT"),
             ("sessions", "stop_requested", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        db.execute("""CREATE TRIGGER IF NOT EXISTS guard_session_insert BEFORE INSERT ON sessions
-                    WHEN EXISTS(SELECT 1 FROM projects WHERE name=NEW.project AND trashed=1)
-                      OR EXISTS(SELECT 1 FROM sessions WHERE id=NEW.parent AND trash_root IS NOT NULL)
-                    BEGIN SELECT RAISE(ABORT,'该项目或讨论已移入回收站'); END""")
+        # Expose records archived in earlier releases without deleting their contents.
+        if db.execute("PRAGMA user_version").fetchone()[0] == 0:
+            db.execute("UPDATE projects SET trashed=0 WHERE trashed=1")
+            db.execute("UPDATE sessions SET trash_root=NULL WHERE trash_root IS NOT NULL")
+            db.execute("DROP TRIGGER IF EXISTS guard_session_insert")
+            db.execute("PRAGMA user_version=1")
         db.execute("COMMIT")
     except BaseException:
         db.execute("ROLLBACK")
@@ -57,8 +70,26 @@ def workspace(row):
     return None
 
 
+def claude_access(db, project):
+    """A later off/on cycle must not revive a call that the user switched off."""
+    epoch = project_row(db, project)["claude_epoch"]
+    address = claude_ip()
+
+    def check():
+        row = db.execute("SELECT claude_enabled,claude_epoch FROM projects WHERE name=? AND trashed=0",
+                         (project,)).fetchone()
+        if address != claude_ip():
+            raise ValueError("Claude 的出口配置已修改，请重新启动调用")
+        if not row or not row["claude_enabled"] or row["claude_epoch"] != epoch:
+            raise ValueError("当前项目已关闭此轮 Claude 调用")
+    return check
+
+
 def models_for(row):
-    return {agent: row[agent] or model(agent) for agent in AGENTS}
+    models = {agent: row[agent] or model(agent) for agent in AGENTS}
+    if row["claude_enabled"]:
+        models["claude"] = row["claude"] or model("claude")
+    return models
 
 
 def project_command(db, current, args, interactive=False):
@@ -88,7 +119,7 @@ def project_command(db, current, args, interactive=False):
         name = parts[0].strip()
         if not name or name in (".", "..") or "/" in name or not name.isprintable():
             raise ValueError("请输入单行项目名，目录作为第二个参数")
-        binding = str(Path(parts[1]).expanduser().resolve()) if len(parts) == 2 else str(Path("workspaces") / name)
+        binding = str(Path(parts[1]).expanduser().resolve()) if len(parts) == 2 else str(Path("workspaces") / project_folder(name).name)
         db.execute("BEGIN IMMEDIATE")
         try:
             if db.execute("SELECT 1 FROM projects WHERE name=?", (name,)).fetchone():
@@ -112,23 +143,44 @@ def project_command(db, current, args, interactive=False):
     return current
 
 
+def configure_claude_ip(db, address):
+    set_claude_ip(address)
+    if not claude_ip():
+        db.execute("UPDATE projects SET claude_enabled=0,claude_epoch=claude_epoch+1 WHERE claude_enabled=1")
+
+
 def model_command(db, current, args, interactive=False):
-    chosen = models_for(project_row(db, current))
+    row = project_row(db, current)
+    chosen = models_for(row)
     if not args:
         print("项目  " + current)
-        for agent in AGENTS:
-            print(f"  {agent:<7} {chosen[agent] or 'CLI 默认'}")
+        for agent in chosen:
+            effort = row[agent + "_effort"] if agent in ("codex", "claude") else None
+            print(f"  {agent:<7} {chosen.get(agent) or 'CLI 默认'} {effort or ''}".rstrip())
         print(MODEL_HELP)
         return
-    pick = len(args) == 1 and args[0] in AGENTS
-    list_only = len(args) == 2 and args[0] == "list" and args[1] in AGENTS
+    if len(args) == 3 and args[:2] == ["claude", "ip"]:
+        configure_claude_ip(db, "" if args[2] == "off" else args[2])
+        return
+    if args in (["claude", "on"], ["claude", "off"]):
+        if args[-1] == "on":
+            check_claude()
+            if not db.execute("UPDATE projects SET claude_enabled=1 WHERE name=? AND claude_epoch=?",
+                              (current, row["claude_epoch"])).rowcount:
+                raise ValueError("检查期间 Claude 已被关闭")
+        else:
+            db.execute("UPDATE projects SET claude_enabled=0,claude_epoch=claude_epoch+1 WHERE name=?", (current,))
+        return
+    pick = len(args) == 1 and args[0] in MODEL_SEATS
+    list_only = len(args) == 2 and args[0] == "list" and args[1] in MODEL_SEATS
     if pick or list_only:
         agent = args[-1]
-        options = catalog(agent)
-        print(f"{agent}  ·  当前 {chosen[agent] or 'CLI 默认'}\n  0  恢复默认")
+        info = model_options(agent)
+        options = list(info)
+        print(f"{agent}  ·  当前 {chosen.get(agent) or 'CLI 默认'}\n  0  恢复默认")
         for i, option in enumerate(options, 1):
-            mark = " *" if option == chosen[agent] else ""
-            print(f"  {i:2}  {option}{mark}")
+            mark = " *" if option == chosen.get(agent) else ""
+            print(f"  {i:2}  {option}{mark}  {' / '.join(info[option])}".rstrip())
         if list_only or not interactive:
             return
         response = input("选择编号（回车取消） > ").strip()
@@ -137,57 +189,30 @@ def model_command(db, current, args, interactive=False):
         if not response.isdecimal() or int(response) > len(options):
             raise ValueError("编号不在清单中")
         args = ["set", agent, (["default"] + options)[int(response)]]
-    if len(args) != 3 or args[0] != "set" or args[1] not in AGENTS:
+        if agent in ("codex", "claude") and args[-1] != "default" and info[args[-1]]:
+            available = info[args[-1]]
+            level = input("思考强度（" + "/".join(available) + "，回车使用默认） > ").strip()
+            if level:
+                args.append(level)
+    effort = None
+    if len(args) == 4 and args[0] == "set" and args[1] in ("codex", "claude"):
+        choice, effort = args[2:]
+        if effort == "default":
+            effort = None
+        elif effort not in model_options(args[1]).get(choice, []):
+            raise ValueError("请为选定型号选择 CLI 支持的思考强度")
+        args = args[:3]
+    if len(args) != 3 or args[0] != "set" or args[1] not in MODEL_SEATS:
         raise ValueError(MODEL_HELP)
     _, agent, choice = args
     if not choice or any(c.isspace() for c in choice) or choice.startswith("-"):
         raise ValueError("请使用模型清单里的型号 ID")
     if agent == "gemini" and choice != "default" and not choice.startswith("gemini-"):
         raise ValueError("Gemini 席位需要 gemini- 开头的型号，可用 model list gemini 查看")
-    db.execute(f"UPDATE projects SET {agent}=? WHERE name=?", (None if choice == "default" else choice, current))
-    effective = models_for(project_row(db, current))[agent]
+    value = None if choice == "default" else choice
+    if agent in ("codex", "claude"):
+        db.execute(f"UPDATE projects SET {agent}=?,{agent}_effort=? WHERE name=?", (value, effort, current))
+    else:
+        db.execute("UPDATE projects SET gemini=? WHERE name=?", (value, current))
+    effective = project_row(db, current)[agent] or model(agent)
     print(f"已保存  {current} · {agent} · {effective or 'CLI 默认'}")
-
-
-def move_trash(db, project, kind, item, restore):
-    """Only change ledger metadata. User workspaces never participate in this transaction."""
-    db.execute("BEGIN IMMEDIATE")
-    try:
-        if kind == "project":
-            if item == DEFAULT:
-                raise ValueError("默认项目中的讨论可以单独移除")
-            if not restore and item != project:
-                raise ValueError("请打开要移除的项目")
-            if not restore and db.execute("SELECT 1 FROM sessions WHERE project=? AND state IN ('active','implementing')",
-                                         (item,)).fetchone():
-                raise ValueError("请先停止或等待项目中正在进行的任务")
-            count = db.execute("UPDATE projects SET trashed=? WHERE name=? AND trashed=?",
-                               (0 if restore else 1, item, 1 if restore else 0)).rowcount
-            if not restore:
-                db.execute("UPDATE selection SET project=? WHERE project=?", (DEFAULT, item))
-        elif kind == "session":
-            if restore:
-                row = db.execute("SELECT parent FROM sessions WHERE id=? AND project=? AND trash_root=id",
-                                 (item, project)).fetchone()
-                if row and db.execute("SELECT 1 FROM sessions WHERE id=? AND trash_root IS NOT NULL", (row[0],)).fetchone():
-                    raise ValueError("请先恢复上游讨论")
-                count = db.execute("UPDATE sessions SET trash_root=NULL WHERE project=? AND trash_root=?",
-                                   (project, item)).rowcount if row else 0
-            else:
-                branch = """WITH RECURSIVE branch(id) AS (
-                    SELECT id FROM sessions WHERE id=? AND project=? AND trash_root IS NULL UNION ALL
-                    SELECT s.id FROM sessions s JOIN branch ON s.parent=branch.id WHERE s.project=? AND s.trash_root IS NULL) """
-                args = (item, project, project)
-                if db.execute(branch + "SELECT 1 FROM sessions WHERE id IN branch AND state IN ('active','implementing')",
-                              args).fetchone():
-                    raise ValueError("请先停止或等待此讨论及其追问")
-                db.execute(branch + "UPDATE sessions SET trash_root=? WHERE id IN branch", (*args, item))
-                count, = db.execute("SELECT changes()").fetchone()
-        else:
-            raise ValueError("未知的回收站操作")
-        if not count:
-            raise ValueError("记录不存在或状态已改变，请刷新")
-        db.execute("COMMIT")
-    except BaseException:
-        db.execute("ROLLBACK")
-        raise

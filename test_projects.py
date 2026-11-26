@@ -19,8 +19,8 @@ class ProjectCommands(unittest.TestCase):
                         ROUNDTABLE_AGY_BIN=str(self.home / "agy"))
 
     def cli(self, *args, stdin=None, ok=True):
-        proc = subprocess.run([sys.executable, "-B", str(APP), *args], input=stdin,
-                              env=self.env, capture_output=True, text=True)
+        proc = subprocess.run([sys.executable, "-X", "utf8", "-B", str(APP), *args], input=stdin,
+                              env=self.env, capture_output=True, text=True, encoding="utf-8")
         if ok:
             self.assertEqual(proc.returncode, 0, proc.stderr)
         else:
@@ -43,6 +43,7 @@ class ProjectCommands(unittest.TestCase):
         self.assertIn("已有的议题", self.cli("--project", "默认", "show", "old"))
         self.assertIn("研究 A", self.cli("project", "list"))
 
+    @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
     def test_number_menus_and_session_project_switch(self):
         target = self.home / "试验"
         self.cli("project", "add", "A", str(target))
@@ -56,6 +57,7 @@ class ProjectCommands(unittest.TestCase):
         self.assertIn("gemini-b", self.cli("model"))
         self.assertNotIn("gemini-b", self.cli("--project", "B", "model"))
 
+    @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
     def test_selection_reaches_worker_and_execute_uses_project_folder(self):
         exe = self.home / "codex"
         exe.write_text("#!" + sys.executable + "\n" + """
@@ -64,7 +66,7 @@ from pathlib import Path
 p = Path(os.environ['TEST_RECEIPT'])
 args = sys.argv[1:]
 p.write_text(args[args.index('--model')+1] + '\\n' + os.getcwd())
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'ok'}}))
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({'status':'done','report':'ok'}) if '--output-schema' in args else 'ok'}}))
 print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tokens':1}}))
 """)
         exe.chmod(0o755)

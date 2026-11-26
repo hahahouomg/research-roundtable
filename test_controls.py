@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import roundtable as rt
-from projects import project_command
-from quotas import codex_windows
+from projects import model_command, project_command, project_row, workspace
+from quotas import claude_windows, codex_windows, read_claude
 
 
 class Controls(unittest.TestCase):
@@ -26,27 +26,66 @@ class Controls(unittest.TestCase):
         row = {"rateLimits":{"planType":"pro","primary":{"usedPercent":23,"windowDurationMins":300,"resetsAt":123}}}
         self.assertEqual(codex_windows(row)["windows"], [{"label":"codex · 5 小时","percent":77,"reset":123}])
 
-    def test_trash_and_restore_preserve_files_and_branches(self):
-        from projects import move_trash
+    def test_claude_quota_never_starts_cli_if_ip_check_fails(self):
+        async def immediate(func):
+            return func()
+        with patch("quotas.asyncio.to_thread",immediate), patch("quotas.check_claude",side_effect=ValueError("IP 不匹配")), patch("quotas.asyncio.create_subprocess_exec") as launch:
+            with self.assertRaisesRegex(ValueError,"IP 不匹配"):
+                asyncio.run(read_claude("/claude"))
+        launch.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
+    def test_switch_off_then_on_terminates_the_old_claude_process(self):
+        folder = Path(os.environ["ROUNDTABLE_HOME"])
+        cli, pidfile = folder/"claude", folder/"worker.pid"
+        cli.write_text('#!/bin/sh\necho "$$" > "$TEST_CLAUDE_PID"\nexec sleep 30\n')
+        cli.chmod(0o700)
+        async def switch_during_call():
+            sid, _, _ = rt.prepare_topic(self.db, "测试开关", None, "默认")
+            task = asyncio.create_task(rt.call(self.db, sid, "独立提案", "claude", "测试", "example"))
+            for _ in range(150):
+                if pidfile.exists() and pidfile.read_text().strip():
+                    break
+                await asyncio.sleep(0.01)
+            pid = int(pidfile.read_text())
+            model_command(self.db, "默认", ["claude", "off"])
+            model_command(self.db, "默认", ["claude", "on"])
+            self.assertIsNone(await asyncio.wait_for(task, 3))
+            err, ended = self.db.execute("SELECT error,ended FROM calls WHERE session=?", (sid,)).fetchone()
+            self.assertIn("关闭", err)
+            self.assertIsNotNone(ended)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+        with patch.dict(os.environ, ROUNDTABLE_CLAUDE_BIN=str(cli), TEST_CLAUDE_PID=str(pidfile)), \
+             patch("projects.check_claude"), patch("providers.check_claude"), \
+             patch("providers.CLAUDE_CHECK_INTERVAL", 0.02), redirect_stdout(io.StringIO()):
+            model_command(self.db, "默认", ["claude", "on"])
+            asyncio.run(switch_during_call())
+
+    def test_claude_quota_uses_only_reported_windows(self):
+        packet = {"type":"control_response", "response":{"request_id":"quota", "response":{
+            "subscription_type":"pro", "rate_limits":{"five_hour":{"utilization":12,"resets_at":"2026-11-24T12:00:00Z"},
+            "seven_day":{"utilization":0}, "seven_day_opus":None}}}}
+        import json
+        self.assertEqual(claude_windows(json.dumps(packet))["windows"], [
+            {"label":"5 小时","percent":88,"reset":"2026-11-24T12:00:00Z"},
+            {"label":"7 天","percent":100,"reset":None}])
+        with self.assertRaises(ValueError):
+            claude_windows(b'{"type":"control_response","response":{}}')
+
+    def test_previous_trash_restored_without_losing_files_or_history(self):
         from local_ui import state
         with redirect_stdout(io.StringIO()):
             project_command(self.db,"默认",["add","A"])
-            root,_,_=rt.prepare_topic(self.db,"根",None,"A")
-            with self.assertRaises(ValueError):
-                move_trash(self.db,"A","project","A",False)
-            self.db.execute("UPDATE sessions SET state='chat' WHERE id=?",(root,))
-            child,_,_=rt.prepare_topic(self.db,"追问",root,"A")
-            self.db.execute("UPDATE sessions SET state='chat' WHERE id=?",(child,))
-        target=Path(os.environ["ROUNDTABLE_HOME"])/"workspaces/A/keep.txt"
+            root,_,_=rt.prepare_topic(self.db,"旧记录",None,"A")
+        target = workspace(project_row(self.db, "A")) / "keep.txt"
         target.write_text("keep")
-        move_trash(self.db,"A","session",root,False)
-        self.assertEqual(state(self.db,"A")["sessions"],[])
-        move_trash(self.db,"A","session",root,True)
-        self.assertEqual(len(state(self.db,"A")["sessions"]),2)
-        move_trash(self.db,"A","project","A",False)
-        self.assertNotIn("A",state(self.db,"默认")["projects"])
-        move_trash(self.db,"默认","project","A",True)
-        self.assertEqual(len(state(self.db,"A")["sessions"]),2)
+        self.db.execute("UPDATE projects SET trashed=1 WHERE name='A'")
+        self.db.execute("UPDATE sessions SET trash_root=id")
+        self.db.execute("PRAGMA user_version=0")
+        rt.setup(self.db)
+        self.assertIn("A",state(self.db,"默认")["projects"])
+        self.assertEqual(state(self.db,"A")["sessions"][0]["id"],root)
         self.assertEqual(target.read_text(),"keep")
 
     def test_stopping_retains_partial_and_cancels_worker(self):

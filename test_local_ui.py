@@ -5,9 +5,11 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
+from urllib.parse import urlencode
 from unittest.mock import patch
 
-from local_ui import Handler
+from local_ui import Handler, choose_directory
 
 
 class Request:
@@ -60,3 +62,63 @@ class BrowserAPITests(unittest.TestCase):
         self.assertEqual(a["seats"][1]["model"], "gemini-test-high")
         self.assertEqual(a["sessions"], [])
         self.assertEqual(self.request("/api/state?project=A&session=missing")[0], 400)
+
+    def test_browse_existing_directories_and_store_valid_effort(self):
+        folder = Path(os.environ["ROUNDTABLE_HOME"])
+        (folder / "已存在的目录").mkdir()
+        (folder / "普通文件").touch()
+        code, raw = self.request("/api/directories?"+urlencode({"path":str(folder)}))
+        self.assertEqual((code,json.loads(raw)["folders"]),(200,["已存在的目录"]))
+        with patch("projects.model_options",return_value={"gpt-test":["low","high"]}):
+            payload = {"agent":"codex","model":"gpt-test","effort":"high"}
+            self.assertEqual(self.request("/api/model",body=payload)[0],200)
+            self.assertEqual(self.request("/api/model",body={**payload,"effort":"unknown"})[0],400)
+        state = json.loads(self.request("/api/state")[1])
+        self.assertEqual((state["seats"][0]["model"],state["seats"][0]["effort"]),("gpt-test","high"))
+        self.assertEqual(self.request("/api/trash",body={"action":"remove"})[0],404)
+
+    def test_claude_opt_in_and_single_seat_routing(self):
+        with patch("local_ui.account_quota") as quota:
+            self.assertEqual(self.request("/api/quota?agent=claude")[0],400)
+            quota.assert_not_called()
+        model = {"agent":"claude","model":"claude-opus-5-5","effort":"max"}
+        self.assertEqual(self.request("/api/model",body=model)[0],200)
+        with patch("projects.check_claude",side_effect=ValueError("IP")):
+            self.assertEqual(self.request("/api/claude",body={"enabled":"on"})[0],400)
+        self.assertEqual(self.request("/api/start",body={"mode":"claude","topic":"test"})[0],400)
+        with patch("projects.check_claude"):
+            self.assertEqual(self.request("/api/claude",body={"enabled":"on"})[0],200)
+        seats = json.loads(self.request("/api/state")[1])["seats"]
+        self.assertEqual(seats[-1]["effort"], "max")
+        with patch("local_ui.start_worker") as worker:
+            self.assertEqual(self.request("/api/start",body={"mode":"claude","topic":"test"})[0],200)
+            self.assertEqual(worker.call_args.args[-3],"claude")
+
+    def test_quota_refresh_does_not_start_a_discussion(self):
+        with patch("local_ui.account_quota", return_value={"windows": [], "checked": 1}) as quota, \
+             patch("local_ui.start_worker") as worker:
+            self.assertEqual(self.request("/api/quota?agent=gemini&refresh=1")[0], 200)
+            quota.assert_called_once_with("gemini", True, None)
+            self.assertEqual(self.request("/api/start", body={"mode":"probe"})[0], 400)
+            worker.assert_not_called()
+        self.assertEqual(json.loads(self.request("/api/state")[1])["sessions"], [])
+
+    def test_native_picker_handles_selected_cancelled_and_headless(self):
+        path = Path(os.environ["ROUNDTABLE_HOME"]) / "中文 ' 工作区"
+        path.mkdir()
+        with patch("local_ui.sys.platform", "darwin"), patch("local_ui.subprocess.run") as run:
+            run.return_value = SimpleNamespace(returncode=0, stdout=str(path)+"/\n", stderr="")
+            code, raw = self.request("/api/choose-directory", body={"path":str(path)})
+            self.assertEqual((code,json.loads(raw)), (200,{"status":"selected","path":str(path.resolve())}))
+            self.assertEqual(run.call_args.args[0][-1], str(path.resolve()))
+            self.assertNotIn(str(path),run.call_args.args[0][-2])
+            run.return_value = SimpleNamespace(returncode=0, stdout="\n", stderr="")
+            self.assertEqual(choose_directory(str(path)), {"status":"cancelled"})
+        with patch("local_ui.sys.platform", "win32"), patch("local_ui.subprocess.run") as run:
+            run.return_value = SimpleNamespace(returncode=0, stdout=str(path)+"\n", stderr="")
+            self.assertEqual(choose_directory(str(path)), {"status":"selected","path":str(path.resolve())})
+            self.assertIn("askdirectory",run.call_args.args[0][-2])
+        with patch("local_ui.sys.platform", "linux"), patch.dict(os.environ, DISPLAY="", WAYLAND_DISPLAY=""), \
+             patch("local_ui.subprocess.run") as run:
+            self.assertEqual(choose_directory(None), {"status":"unavailable"})
+            run.assert_not_called()

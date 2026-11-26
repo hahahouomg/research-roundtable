@@ -28,6 +28,11 @@ class ProviderTests(unittest.TestCase):
         text, _ = parse_reply("gemini", json.dumps({"event": "result", "result": result}))
         self.assertEqual(json.loads(text), ballot)
 
+    def test_agy_denied_command_is_an_error_even_with_success_status(self):
+        result = {"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}
+        with self.assertRaisesRegex(ValueError,"权限被拒绝：Bash"):
+            parse_reply("gemini",json.dumps(result))
+
     def test_missing_usage_stays_unknown(self):
         _, usage = parse_reply("gemini", '{"status":"SUCCESS","response":"ok"}')
         self.assertIsNone(usage["total"])
