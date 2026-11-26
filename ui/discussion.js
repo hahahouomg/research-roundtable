@@ -1,37 +1,5 @@
 "use strict";
 
-// Keep inspection on the selected historical stage as live calls arrive.
-let inspectedSession = null, inspectedStage = null;
-let replayTimer=null;
-function stopReplay(){
-  clearTimeout(replayTimer);
-  replayTimer=null;
-}
-function playStages(record){
-  const stages=stageHistory(record);
-  const selected=stages.findIndex(stage=>stage.name===inspectedStage);
-  let index=selected>=0 && selected<stages.length-1 ? selected : 0;
-  function advance(){
-    stopReplay();
-    if(document.hidden || data.selected?.id!==record.id)return;
-    inspectedStage=stages[index++].name;
-    if(index<stages.length)replayTimer=setTimeout(advance,2100);
-    renderDiscussion(data.selected);
-    const art=$("conversation").querySelector(".map-art");
-    if(art)enter(art);
-  }
-  advance();
-}
-function inspectPhase(index){
-  const record=data.selected;
-  const stage=record && stageHistory(record)[Number(index)];
-  if(!stage)return;
-  stopReplay();
-  inspectedStage=stage.name;
-  renderDiscussion(record);
-  const map=$("conversation").querySelector(".map-art");
-  if(map)enter(map);
-}
 function stageHistory(record) {
   const groups = new Map();
   for (const call of record.calls) {
@@ -40,83 +8,96 @@ function stageHistory(record) {
   }
   return [...groups].map(([name, calls]) => ({name, calls}));
 }
-function voteOf(call) {
-  if (!call.ended || call.error) return null;
-  try {
-    const v = JSON.parse(call.reply);
-    return v?.reason?.trim() && ["accept", "object"].includes(v.vote) ? v.vote : null;
-  } catch { return null; }
-}
-const shortStage = name => t(({
-  "独立提案":"提案", "交叉评议":"互评", "候选方案":"拟稿", "表决":"表决",
-  "最终方案撰写":"定稿", "图文 PDF 排版":"排版", "讨论总结":"总结"
-})[name.replace(/ v\d+$/, "")] || name.replace(/ v\d+$/, "")) + (name.match(/ v\d+$/)?.[0] || "");
-
-function stageMap(record) {
-  const stages = stageHistory(record);
-  const agents = [...new Set([...(record.seat_names || []), ...record.calls.map(c => c.agent)])].filter(a => Object.hasOwn(labels, a));
-  const voters = record.seat_names?.length ? record.seat_names : agents;
-  if (agents.length < 2 || !stages.length) return "";
-  if (inspectedSession !== record.id) {
-    inspectedSession = record.id;
-    inspectedStage = null;
+// Some CLI versions print the same ballot twice. Keep the original reply available in the reader.
+function ballotData(raw) {
+  if(typeof raw!=="string")return null;
+  let value;
+  try { value=JSON.parse(raw); }
+  catch {
+    for(const boundary of raw.matchAll(/}\s*(?=\{)/g)){
+      try {
+        const end=boundary.index+1, first=JSON.parse(raw.slice(0,end)), second=JSON.parse(raw.slice(end));
+        const keys=Object.keys(first);
+        if(keys.length===Object.keys(second).length && keys.every(k=>Object.hasOwn(second,k) && first[k]===second[k])){
+          value=first;
+          break;
+        }
+      } catch { /* A brace inside a quoted reason is not a record boundary. */ }
+    }
   }
-  const latestVote = stages.map(s => s.name).filter(s => s.startsWith("表决")).at(-1);
-  const preferred = inspectedStage || (!ongoing(record.state) && latestVote) || stages.at(-1).name;
-  const index = Math.max(0, stages.findIndex(s => s.name === preferred));
-  const stage = stages[index], voting = stage.name.startsWith("表决");
-  const seats = agents.map(agent => {
-    const attempts = stage.calls.filter(c => c.agent === agent);
-    const call = attempts.at(-1);
-    const vote = voting && call && voteOf(call);
-    const state = !call ? "未调用" : call.error ? "已中断" : !call.ended ? "发言中" :
-      vote === "accept" ? "赞成" : vote === "object" ? "有异议" : voting ? "无有效票" : "已发言";
-    return {agent, call, state};
+  return value && ["accept","object"].includes(value.vote) && typeof value.reason==="string" && value.reason.trim() ? value : null;
+}
+function voteOf(call) {
+  return call.ended && !call.error ? ballotData(call.reply)?.vote || null : null;
+}
+
+let inspectedSession=null, inspectedPhase=null;
+
+function selectVisualPhase(value){
+  const s=data.selected;
+  if(!s)return;
+  const stage=stageHistory(s)[Number(value)];
+  if(value!==null && !stage)return;
+  inspectedPhase=value===null || (ongoing(s.state) && stage.name===s.calls.at(-1)?.stage) ? null : stage.name;
+  const root=$("discussionVisual"), trigger=document.activeElement;
+  if(!root)return;
+  const fromVisual=root.contains(trigger), visual=visualModel(s,sessionDocuments(s));
+  const template=document.createElement("template");
+  template.innerHTML=window.createDiscussionVisual(visual);
+  patchChildren(root,template.content);
+  window.syncDiscussionVisual?.(root,visual);
+  if(fromVisual && !trigger.isConnected){
+    const dest=value!==null && root?.querySelector('[data-visual-phase="'+Number(value)+'"]');
+    (dest || root)?.focus({preventScroll:true});
+  }
+}
+function focusToolRequest(id){
+  const card=document.querySelector('.permission[data-key="permission-'+Number(id)+'"]');
+  if(!card)return;
+  card.focus({preventScroll:true});
+  card.scrollIntoView({block:"center",behavior:motionAllowed.matches?"smooth":"auto"});
+}
+
+function visualKind(name){
+  if(name.startsWith("表决"))return "ballot";
+  if(name.startsWith("候选方案"))return "draft";
+  return ({"独立提案":"proposal","交叉评议":"review","最终方案撰写":"document","图文 PDF 排版":"document","讨论总结":"document","实施":"execution","集成复核":"execution"})[name] || "other";
+}
+function visualModel(s,docs){
+  const ids=[...new Set([...(s.seat_names||[]),...s.calls.map(c=>c.agent)])].filter(a=>Object.hasOwn(labels,a));
+  if(ids.length<2)return null;
+  if(inspectedSession!==s.id){inspectedSession=s.id;inspectedPhase=null;}
+  const requests=(s.permissions||[]).map(r=>{
+    const d=r.details||{};
+    return {id:r.id,agent:r.agent,stage:r.stage,title:String((d.rawInput||d.args)?.toolSummary || d.title || d.kind || t("工具请求"))};
   });
-  const replies = seats.filter(s => s.call?.ended && !s.call.error).length;
-  const accepts = seats.filter(s => voters.includes(s.agent) && s.state === "赞成").length;
-  const featured = seats.find(s => s.state==="有异议") || seats.find(s=>s.call?.reply && !s.call.error);
-  const quote = featured && shortCall(featured.call);
-  const glimpse = quote ? `<button class="stage-glimpse" data-read="call-${Number(featured.call.id)}"><b>${labels[featured.agent]}</b><span>${esc(quote.slice(0,78))}${quote.length>78?"…":""}</span>${icon("chevron")}</button>` : "";
-  const positions = seats.length === 2 ? [[92,100],[328,100]] : [[92,127],[210,54],[328,127]];
-  const controls = seats.map(({agent,call,state},i) => {
-    const active = call ? ' data-read="call-'+Number(call.id)+'"' : ' disabled';
-    return `<button type="button" class="map-seat slot-${i} ${agent}"${active} aria-label="${esc(labels[agent]+' · '+t(state))}"><span class="map-token">${glyph(agent)}</span><span class="map-label">${labels[agent]}<small>${t(state)}</small></span></button>`;
-  }).join("");
-  const lines = positions.map(([x,y],i) => {
-    if (!seats[i].call) return "";
-    const color = seats[i].state === "有异议" ? "#ffc681" : {codex:"#99e0d1",gemini:"#d1c6ff",claude:"#eaba91"}[seats[i].agent];
-    return `<path class="map-trace" stroke="${color}" d="M${x} ${y} Q${x} 105 210 109"/>`;
-  }).join("");
-  const cross = stage.name === "交叉评议" ? positions.map(([x,y],i) => {
-    const [toX,toY] = positions[(i+1)%positions.length];
-    return seats[i].call ? `<path class="map-review-edge" d="M${x} ${y} Q210 ${i%2?150:15} ${toX} ${toY}"/>` : "";
-  }).join("") : "";
-  const ticks = Array.from({length:60},(_,i)=>{
-    const a=i*Math.PI/30, major=i%5===0;
-    return `M${210+157*Math.cos(a)} ${103+58*Math.sin(a)}l${(major?8:3)*Math.cos(a)} ${(major?4:1.6)*Math.sin(a)}`;
-  }).join("");
-  const center = voting ? (seats.some(s=>s.state==="有异议") ? "±" : accepts===voters.length ? "✓" : "…") :
-    stage.name==="交叉评议" ? "⇄" : stage.name.startsWith("候选方案") ? "≡" : "◎";
-  return `<section class="forum" data-key="round-map" aria-label="${t("讨论回放")}">
-    <div class="forum-top"><h2><i class="forum-mark" aria-hidden="true"></i>${t("讨论回放")}</h2><label class="phase-select"><span aria-hidden="true">${t("阶段")} <b>${String(index+1).padStart(2,"0")}</b> / ${String(stages.length).padStart(2,"0")} ▾</span><select id="phaseSelect" aria-label="${t("选择阶段")}">${stages.map((step,i)=>`<option value="${i}" ${i===index?"selected":""}>${i+1} · ${esc(shortStage(step.name))}</option>`).join("")}</select></label></div>
-    <div class="forum-body"><div class="forum-caption"><h3>${esc(displayStage(stage.name))}</h3>
-      <p class="forum-count"><b>${voting?accepts:replies}</b><span>/ ${voting?voters.length:seats.filter(s=>s.call).length}</span></p>
-      <p class="forum-measure">${t(voting?"席位赞成":"席位已回复")}</p>${glimpse}</div>
-      <div class="map-art seats-${seats.length}">
-        <svg viewBox="0 0 420 200" aria-hidden="true" focusable="false">
-          <g fill="none" stroke="#7ba8aa"><ellipse opacity=".18" cx="210" cy="104" rx="187" ry="73" stroke-dasharray="2 6"/>
-          <ellipse opacity=".23" cx="210" cy="111" rx="153" ry="56"/><ellipse fill="#254548" cx="210" cy="103" rx="153" ry="56"/>
-          <ellipse cx="210" cy="103" rx="143" ry="51" opacity=".40"/><ellipse cx="210" cy="103" rx="99" ry="33" opacity=".28"/>
-          <path opacity=".65" d="${ticks}"/><g data-key="routes-${index}">${lines}${cross}</g></g>
-          <ellipse cx="210" cy="114" rx="28" ry="10" fill="#193436" stroke="#62868a"/>
-          <ellipse cx="210" cy="108" rx="28" ry="12" fill="#304e50" stroke="#bfd7c9"/>
-          <text x="210" y="113" text-anchor="middle" font-size="17" fill="#e1edd7">${center}</text>
-        </svg>${controls}
-      </div></div>
-    <div class="forum-foot"><button type="button" id="playStages" aria-label="${t(replayTimer?"暂停回放":"播放回放")}" title="${t(replayTimer?"暂停回放":"播放回放")}" aria-pressed="${Boolean(replayTimer)}">${replayTimer?"Ⅱ":"▶"}</button><button class="map-step" data-phase-index="${index-1}" aria-label="${t("上一阶段")}" ${index===0?"disabled":""}>‹</button>
-    <div class="phase-track" role="group" aria-label="${t("选择阶段")}">${stages.map((s,i)=>`<button type="button" data-phase-index="${i}" aria-pressed="${i===index}" class="${i<index?"passed":""}" title="${esc(displayStage(s.name))}" aria-label="${esc(displayStage(s.name))}"><i></i></button>`).join("")}</div>
-    <button class="map-step" data-phase-index="${index+1}" aria-label="${t("下一阶段")}" ${index===stages.length-1?"disabled":""}>›</button></div></section>`;
+  const running=ongoing(s.state);
+  let previousVotes=[];
+  const phases=stageHistory(s).map(stage=>{
+    const kind=visualKind(stage.name);
+    const seats=ids.map(id=>{
+      const c=stage.calls.filter(c=>c.agent===id).at(-1);
+      if(!c && kind==="ballot" && stage.name.includes("同稿补票")){
+        const prior=previousVotes.find(b=>b.id===id && b.vote);
+        if(prior)return {...prior,carried:true};
+      }
+      const req=c && !c.ended && requests.find(r=>r.stage===stage.name && r.agent===id);
+      const vote=kind==="ballot" && c && c.ended && !c.error ? ballotData(c.reply) : null;
+      const state=!c ? "absent" : req ? "permission" : c.error ? "error" : !c.ended ?
+        (running ? (c.reply?"writing":"pending") : "unfinished") : kind==="ballot" ? (vote?.vote||"invalid") : "done";
+      return {id,name:labels[id],state,callId:c?.id??null,excerpt:vote ? "" : (c && (c.error||shortCall(c)) || "").slice(0,320),
+        reason:vote?.reason||"",vote:vote?.vote||null,carried:false,requestId:req?.id??null,requestTitle:req?.title||""};
+    });
+    if(kind==="ballot")previousVotes=seats;
+    return {name:stage.name,title:displayStage(stage.name),kind,seats};
+  });
+  const latest=phases.findIndex(p=>p.name===s.calls.at(-1)?.stage);
+  const pinned=phases.findIndex(p=>p.name===inspectedPhase);
+  const lastVote=phases.findLastIndex(p=>p.kind==="ballot");
+  const index=pinned>=0 ? pinned : !running && lastVote>=0 ? lastVote : latest;
+  return {id:s.id,language:uiLanguage(),topic:s.topic,status:s.state,running,stopping:Boolean(s.stop_requested),
+    following:running && pinned<0,index,latest,agents:ids.map(id=>({id,name:labels[id]})),phases,requests,
+    documents:docs.map(d=>({id:d.key,name:d.name}))};
 }
 
 function voteHistory(record){
@@ -195,7 +176,6 @@ function docRow(doc){
 
 let readerSession, readerTrigger, readerCall, returnScroll, readerSections=[];
 function openReader(key, trigger) {
-  if(replayTimer){stopReplay();renderDiscussion(data.selected);}
   const record=data.selected;
   if(!record)return;
   const dialog=$("reader");

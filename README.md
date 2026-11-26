@@ -5,7 +5,7 @@
 Run a research discussion with Codex and Gemini from a local browser. Give the agents a question and a working folder. They propose independently, compare evidence, and vote on the same plan. Gemini writes the final draft after unanimous approval.
 
 - **Research together.** Agents can read project material, search for sources, and run small experiments in separate working copies. Cross-review gives each agent a distinct focus and records the evidence, open objections, and checks that could resolve them.
-- **Keep the reasoning.** View original replies and votes alongside the result. Resume an interrupted round with the same inputs, or start a linked follow-up with updated files. If agreement remains out of reach, close the discussion and ask Gemini to summarize the differences.
+- **Follow the discussion.** In the loom view, each thread follows one agent and each row marks a stage. Select a spool to read that agent’s contributions, or open a vote to see its reason. You can revisit an earlier stage while the discussion runs and return to live updates in one click. Resume an interrupted round with the same inputs, or start a linked follow-up with updated files. If agreement remains out of reach, close the discussion and ask Gemini to summarize the differences.
 - **Review before applying changes.** Approved plans can be implemented in an isolated workspace. Inspect or download the actual Git patch, alongside the agents’ handoffs and verification reports.
 - **Work locally.** Switch between English and Simplified Chinese in the header. Keep discussions in separate folders and export plans and transcripts as Markdown. PDF export is optional.
 

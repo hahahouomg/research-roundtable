@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -53,6 +54,16 @@ class BrowserAPITests(unittest.TestCase):
         self.assertEqual(self.request("/api/project", body={"action": "add", "name": "bad"},
                                       origin="https://other.example")[0], 403)
         self.assertEqual(json.loads(self.request("/api/state")[1])["projects"], ["默认"])
+
+    def test_page_can_load_its_scripts_and_styles(self):
+        _, html = self.request("/")
+        assets = re.findall(rb'<(?:script|link)\b[^>]*?\b(?:src|href)="(/[^"]+)"', html)
+        self.assertTrue({b"/visual.js", b"/visual.css"}.issubset(assets))
+        for asset in assets:
+            with self.subTest(asset=asset):
+                status, body = self.request(asset.decode(), key="")
+                self.assertEqual(status, 200)
+                self.assertTrue(body)
 
     def test_ui_project_model_settings_are_scoped_and_persistent(self):
         self.assertEqual(self.request("/api/project", body={"action": "add", "name": "A"})[0], 200)

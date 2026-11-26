@@ -28,7 +28,8 @@ from outcomes import failure_kind
 from providers import MODEL_SEATS, binary, default_timeout, model_options
 
 ASSETS = Path(__file__).resolve().parent / "ui"
-FILES = {"/discussion.js": ("discussion.js", "text/javascript"), "/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
+FILES = {"/visual.js": ("visual.js", "text/javascript"), "/visual.css": ("visual.css", "text/css"),
+         "/discussion.js": ("discussion.js", "text/javascript"), "/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
          "/style.css": ("style.css", "text/css"), "/i18n.js": ("i18n.js", "text/javascript")}
 
 

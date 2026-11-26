@@ -17,7 +17,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -X utf8 -B -m unittest discover -v
-      - run: node --check ui/app.js
+      - name: Check browser scripts
+        shell: bash
+        run: |
+          for script in ui/*.js; do
+            node --check "$script"
+          done
       - name: Start the native Windows server
         if: runner.os == 'Windows'
         shell: pwsh
