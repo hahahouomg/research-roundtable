@@ -18,3 +18,21 @@ jobs:
           python-version: '3.12'
       - run: python -X utf8 -B -m unittest discover -v
       - run: node --check ui/app.js
+      - name: Start the native Windows server
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:ROUNDTABLE_HOME = Join-Path $env:RUNNER_TEMP 'roundtable-smoke'
+          $app = Start-Process python -PassThru -NoNewWindow -ArgumentList '-X','utf8','-B','roundtable.py','web','--port','18769','--no-open'
+          try {
+            $page = $null
+            for ($attempt = 0; $attempt -lt 20 -and !$page; $attempt++) {
+              try { $page = Invoke-WebRequest http://127.0.0.1:18769/ -TimeoutSec 2 }
+              catch { Start-Sleep -Milliseconds 250 }
+            }
+            if (!$page -or $page.Content -notmatch 'id="moderator"') {
+              throw 'The native Windows workbench did not answer.'
+            }
+          } finally {
+            if (!$app.HasExited) { Stop-Process -Id $app.Id }
+          }

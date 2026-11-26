@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 APP = Path(__file__).resolve().with_name("roundtable.py")
@@ -28,7 +29,7 @@ class ProjectCommands(unittest.TestCase):
         return proc.stdout + proc.stderr
 
     def test_old_records_stay_in_default_new_projects_are_isolated(self):
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db, db:
             db.execute("""CREATE TABLE sessions(id TEXT PRIMARY KEY, topic TEXT, parent TEXT, state TEXT,
                        plan TEXT DEFAULT '', workspace TEXT DEFAULT '', started REAL, owner INTEGER)""")
             db.execute("INSERT INTO sessions(id,topic,state) VALUES('old','已有的议题','consensus')")
@@ -77,7 +78,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         self.cli("model", "set", "codex", "gpt-test")
         self.cli("ask", "codex", "题目")
         self.assertEqual(receipt.read_text().splitlines()[0], "gpt-test")
-        with sqlite3.connect(self.db) as db:
+        with closing(sqlite3.connect(self.db)) as db, db:
             sid, = db.execute("SELECT id FROM sessions").fetchone()
             db.execute("UPDATE sessions SET state='consensus', plan='演示方案' WHERE id=?", (sid,))
         self.cli("implement", sid)

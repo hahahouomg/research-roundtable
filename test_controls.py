@@ -100,7 +100,7 @@ class Controls(unittest.TestCase):
                 finally:
                     killed.set()
             sid,context,models = rt.prepare_topic(self.db,"示例",None,"默认")
-            with patch("roundtable.invoke",fake):
+            with patch("roundtable.invoke",fake), patch("roundtable.binary",return_value="/fixture"):
                 task = asyncio.create_task(rt.run_topic(self.db,sid,context,models,"gemini",1,False))
                 await asyncio.wait_for(reached.wait(),1)
                 rt.request_stop(self.db,sid,"默认")
