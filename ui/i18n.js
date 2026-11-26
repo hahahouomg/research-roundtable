@@ -238,7 +238,7 @@ const english = {
   "讨论详情": "Discussion details",
   "讨论内容": "Discussion topic",
   "讨论方式": "Discussion mode",
-  "共同讨论": "Discuss together",
+  "共同讨论": "Group discussion",
   "只问 Codex": "Ask Codex",
   "只问 Gemini": "Ask Gemini",
   "主持": "Moderator",

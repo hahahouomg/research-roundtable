@@ -3032,6 +3032,10 @@ button,
     max-width: 112px;
   }
 
+  :lang(en) #mode {
+    max-width: 135px;
+  }
+
   #moderatorField {
     padding-left: 8px;
     gap: 4px;
