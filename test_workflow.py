@@ -3,6 +3,8 @@ import contextlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -155,6 +157,102 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(invoke.await_count,1)
         self.assertEqual(invoke.call_args.args[0],"gemini")
         self.assertEqual(app.session(self.db,sid)["state"],"consensus")
+
+    def test_cross_review_keeps_evidence_and_only_counts_valid_votes(self):
+        seen = {}
+        async def answer(agent, prompt, ballot=False, schema=None, **kwargs):
+            if ballot:
+                return json.dumps({"vote":"object" if agent == "gemini" else "accept", "reason":"Check blank samples"}), {}
+            if schema:
+                return json.dumps({"plan":"Candidate", "tasks":[{"owner":"codex","task":"Build","acceptance":"Test"}],
+                                   "dispositions":[{"id":"E1.1","response":"Add blank samples before deciding"}]}), {}
+            if "完整候选" in prompt:
+                seen[agent] = prompt
+                if agent == "gemini":
+                    return "Free-form alternative", {}
+                return json.dumps({"items":[
+                    {"claim":"Noise could explain the result","kind":"observation","source":"raw.csv:L2","blocking":True,
+                     "check":"Check that blanks stay below 2 mV"},
+                    {"claim":"An unchecked assertion","kind":"reference","blocking":True}]}), {}
+            return {"codex":"Blank sample proposal","gemini":"Repeated measures proposal"}[agent], {}
+        with patch("roundtable.invoke", side_effect=answer):
+            sid = asyncio.run(app.begin(self.db, "Use the same baseline", rounds=1))
+        for agent, prompt in seen.items():
+            self.assertIn("Blank sample proposal", prompt)
+            self.assertIn("Repeated measures proposal", prompt)
+            self.assertIn("Use the same baseline", prompt)
+            self.assertNotIn(agent, prompt)
+        review = app.discussion_review(self.db, sid)
+        self.assertEqual(review["votes"], {"codex":"accept","gemini":"object"})
+        self.assertEqual(review["original"], ["gemini"])
+        item, downgraded = review["items"]
+        self.assertEqual((item["id"], item["agent"], item["response"]), ("E1.1", "codex", "Add blank samples before deciding"))
+        self.assertFalse(downgraded["blocking"])
+        self.assertIn("评议者报告", app.transcript(self.db, sid, "默认"))
+
+    def test_changed_input_blocks_resuming_without_spending_calls(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            source = Path(workspace)
+            material = source / "source.txt"
+            material.write_text("baseline", encoding="utf-8")
+            app.project_command(self.db, "默认", ["path", str(source)])
+            sid = self.discuss(fail=True)
+            (source / ".env").write_text("ignore this", encoding="utf-8")
+            with patch("roundtable.invoke", return_value=("temporary reply", {})) as invoke:
+                asyncio.run(app.resume_discussion(self.db, sid, "默认"))
+                self.assertGreater(invoke.await_count, 0)
+            material.write_text("new baseline", encoding="utf-8")
+            with patch("roundtable.invoke") as invoke:
+                asyncio.run(app.resume_discussion(self.db, sid, "默认"))
+                invoke.assert_not_called()
+                record = app.session(self.db, sid)
+                self.assertEqual(record["state"], "incomplete")
+                self.assertEqual(json.loads(record["settings"])["input_change"]["paths"], ["source.txt"])
+                with self.assertRaisesRegex(ValueError, "关联讨论"):
+                    asyncio.run(app.resume_discussion(self.db, sid, "默认"))
+            self.assertIn("codex observation", app.transcript(self.db, sid, "默认"))
+
+    @unittest.skipUnless(shutil.which("git"), "Git required for previews")
+    def test_preview_creates_applicable_patch_without_editing_original(self):
+        for versioned in (True, False):
+            with self.subTest(versioned=versioned), tempfile.TemporaryDirectory() as workspace:
+                source = Path(workspace).resolve()
+                original = source / "source.txt"
+                original.write_bytes(b"baseline\n")
+                def git(*args):
+                    return subprocess.check_output(["git", "-C", str(source), *args], stderr=subprocess.PIPE)
+                if versioned:
+                    git("init", "-q")
+                    git("add", ".")
+                    git("-c", "user.name=Roundtable", "-c", "user.email=roundtable@example.invalid", "commit", "-qm", "baseline")
+                sid = self.discuss()
+                if versioned:
+                    original.write_bytes(b"dirty\n")
+                    with self.assertRaisesRegex(ValueError, "未提交"):
+                        asyncio.run(app.implement(self.db, sid, source, preview=True))
+                    self.assertEqual(app.session(self.db, sid)["state"], "consensus")
+                    self.assertEqual(original.read_bytes(), b"dirty\n")
+                    original.write_bytes(b"baseline\n")
+                calls = []
+                async def execute(agent, prompt, workspace, reviewing, **kwargs):
+                    calls.append((workspace, reviewing))
+                    if not reviewing:
+                        (workspace / "source.txt").write_bytes(b"updated\n")
+                        (workspace / "added.bin").write_bytes(b"\x00\x03")
+                    self.assertEqual(original.read_bytes(), b"baseline\n")
+                    return '{"status":"done","report":"Verified"}', {}
+                with patch("roundtable.invoke", side_effect=execute):
+                    self.assertEqual(asyncio.run(app.implement(self.db, sid, source, preview=True)), "returned")
+                self.assertNotEqual(calls[0][0], source)
+                self.assertEqual([reviewing for _, reviewing in calls], [False,False,True])
+                self.assertFalse(calls[0][0].exists())
+                self.assertEqual(original.read_bytes(), b"baseline\n")
+                self.assertFalse((source / "added.bin").exists())
+                preview = app.discussion_folder("默认", sid) / app.PATCH_NAME
+                git("apply", "--check", str(preview))
+                if versioned:
+                    self.assertEqual(git("status", "--short"), b"")
+                    self.assertEqual(git("worktree", "list", "--porcelain").count(b"worktree "), 1)
 
     def test_overlapping_implementation_is_rejected(self):
         one, two = self.discuss(), self.discuss()

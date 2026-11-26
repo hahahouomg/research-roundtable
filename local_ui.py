@@ -23,12 +23,13 @@ from local_settings import claude_ip
 from record_store import discussion_folder, project_folder
 from runtime import show_folder
 from projects import claude_access, configure_claude_ip, model_command, models_for, project_command, project_row, workspace
+from implementation_preview import PATCH_NAME
 from outcomes import failure_kind
 from providers import MODEL_SEATS, binary, default_timeout, model_options
 
 ASSETS = Path(__file__).resolve().parent / "ui"
 FILES = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
-         "/style.css": ("style.css", "text/css")}
+         "/style.css": ("style.css", "text/css"), "/i18n.js": ("i18n.js", "text/javascript")}
 
 
 def state(db, project, sid=None):
@@ -62,6 +63,9 @@ def state(db, project, sid=None):
         selected = {k: record[k] for k in ("id", "topic", "parent", "state", "plan", "workspace", "started", "stop_requested", "failure")}
         settings = json.loads(record["settings"] or "{}")
         selected["notice"] = settings.get("notice")
+        selected["input_change"] = settings.get("input_change")
+        selected["implementation_preview"] = bool(settings.get("implementation_preview"))
+        selected["has_patch"] = (discussion_folder(project, sid) / PATCH_NAME).is_file()
         selected["moderator"] = rt.moderator_for(db, sid, settings["models"]) if "models" in settings and settings.get("mode", "both") == "both" else None
         selected["can_resume"] = record["state"] == "incomplete" and settings.get("mode") in ("both", *settings.get("models", {}))
         selected["plan_versions"] = settings.get("plan_versions") if selected["moderator"] else None
@@ -70,6 +74,7 @@ def state(db, project, sid=None):
         selected["calls"] = [dict(c, failure_kind=c["failure_kind"] or failure_kind(c["error"])) for c in db.execute("""
                              SELECT id,stage,agent,model,effort,reply,error,failure_kind,usage,ended,started
                              FROM calls WHERE session=? ORDER BY id""", (sid,))]
+        selected["review"] = rt.discussion_review(db, sid, selected["calls"], settings)
         selected["permissions"] = [
             dict(id=p["id"], stage=p["stage"], agent=p["agent"], details=json.loads(p["details"]), can_allow=bool(p["can_allow"]))
             for p in db.execute("""SELECT p.*, c.stage, c.agent FROM tool_permissions p JOIN calls c ON c.id=p.call_id
@@ -245,6 +250,17 @@ class Handler(BaseHTTPRequestHandler):
                     result = state(db, project, sid)
                 elif not post and url.path == "/api/record":
                     result = {"markdown": rt.transcript(db, sid, project)}
+                elif not post and url.path == "/api/patch":
+                    rt.session(db, sid, project)
+                    path = discussion_folder(project, sid) / PATCH_NAME
+                    if not path.is_file():
+                        raise ValueError("实施预览没有可下载的补丁")
+                    if body.get("excerpt") == "1":
+                        with path.open("rb") as stream:
+                            data = stream.read(128 * 1024 + 1)
+                        result = {"patch": data[:128 * 1024].decode("utf-8", "replace"), "truncated": len(data) > 128 * 1024}
+                    else:
+                        return self.send(200, path.read_bytes(), "application/octet-stream")
                 elif url.path == "/api/pdf":
                     record = rt.session(db, sid, project)
                     path = pdf_path(record["id"], project)
@@ -320,7 +336,10 @@ class Handler(BaseHTTPRequestHandler):
                     result = {"session": sid}
                 elif post and url.path == "/api/implement":
                     # The engine claims the approved plan atomically. Its running state is visible to polling tabs.
-                    outcome = asyncio.run(rt.implement(db, sid, body.get("path"), project))
+                    mode = body.get("mode", "preview")
+                    if mode not in ("preview", "direct"):
+                        raise ValueError("未知实施模式")
+                    outcome = asyncio.run(rt.implement(db, sid, body.get("path"), project, preview=mode == "preview"))
                     result = {"state": outcome}
                 else:
                     return self.send(404, {"error": "找不到此页面"})

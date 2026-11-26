@@ -647,8 +647,27 @@ header {
   color: var(--soft);
 }
 
-.health {
+.header-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+}
+.language {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-body);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  min-height: 34px;
+}
+.language:hover {
+  border-color: var(--accent-line);
+}
+.health {
   gap: 7px;
   padding: 7px 13px;
   border-radius: 999px;
@@ -745,7 +764,7 @@ header {
   color: var(--ink);
 }
 
-.intro h1 span {
+.intro h1 .intro-question {
   color: var(--accent-warm);
 }
 
@@ -3143,4 +3162,50 @@ button,
     transition: none !important;
     scroll-behavior: auto !important;
   }
+}
+
+.review-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 15px;
+  margin-block: 12px;
+}
+.review-card summary small {
+  color: var(--soft);
+  margin-inline-start: .7em;
+  font-size: .86em;
+}
+.evidence-list {
+  padding-inline-start: 1.2rem;
+  display: grid;
+  gap: 12px;
+}
+.evidence-list p {
+  margin: .35em 0;
+  overflow-wrap: anywhere;
+}
+.evidence-meta,
+.evidence-list small {
+  color: var(--soft);
+  font-size: .85em;
+}
+.evidence-list dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: .25em .65em;
+  font-size: .9em;
+}
+.evidence-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+#inspectPatch pre {
+  max-height: 28em;
+  overflow: auto;
+  white-space: pre;
+}
+@media (max-width: 580px) {
+  .crumb i, .crumb b { display: none; }
+  .language { min-height: 40px; }
+  .header-actions { gap: 5px; }
 }

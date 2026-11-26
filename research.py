@@ -1,4 +1,5 @@
 """Create private, writable experiment folders from the project's working files."""
+import hashlib
 import os
 import shutil
 import stat
@@ -48,3 +49,15 @@ def research_copy(source, target):
 
 def raise_walk_error(exc):
     raise exc
+
+
+def input_fingerprint(folder):
+    result = {}
+    for path in sorted(folder.rglob("*")):
+        if path.is_file():
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(128 * 1024), b""):
+                    digest.update(chunk)
+            result[path.relative_to(folder).as_posix()] = digest.hexdigest()
+    return result

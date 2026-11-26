@@ -11,11 +11,14 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
+from deliberation import review_items, review_prompt, review_state
+from implementation_preview import PATCH_NAME, implementation_preview
 from outcomes import CallFailure, failure_kind
 from providers import AGENTS, MODEL_SEATS, binary, invoke, check_claude
-from research import research_copy
+from research import input_fingerprint, research_copy
 from record_store import discussion_folder, reconcile
 from runtime import process_alive, write_text
 from projects import (DEFAULT, MODEL_HELP, PROJECT_HELP, claude_access, data_dir, model_command, models_for,
@@ -304,8 +307,11 @@ def plan_schema(seats):
     task = {"type": "object", "additionalProperties": False, "required": ["owner", "task", "acceptance"],
             "properties": {"owner": {"type": "string", "enum": list(seats)},
                            "task": {"type": "string"}, "acceptance": {"type": "string"}}}
-    return {"type": "object", "additionalProperties": False, "required": ["plan", "tasks"],
-            "properties": {"plan": {"type": "string"}, "tasks": {"type": "array", "items": task}}}
+    disposition = {"type": "object", "additionalProperties": False, "required": ["id", "response"],
+                   "properties": {"id": {"type": "string"}, "response": {"type": "string"}}}
+    return {"type": "object", "additionalProperties": False, "required": ["plan", "tasks", "dispositions"],
+            "properties": {"plan": {"type": "string"}, "tasks": {"type": "array", "items": task},
+                           "dispositions": {"type": "array", "items": disposition}}}
 
 
 def read_plan(reply, seats):
@@ -337,12 +343,6 @@ async def write_final(db, sid, source, plan, votes, model, folder):
     return written
 
 
-def cross_review_prompt(base, proposals):
-    return (base + "逐一点评其余席位，点名对方并准确复述其主张。说明赞同之处、最重要的分歧或漏洞，"
-            "给出能区分解释的一项检验。已有来源不必重复检索，确有证据缺口可用工具。无实质分歧时直接说明。\n"
-            + bundle(proposals))
-
-
 async def discuss(db, sid, topic, rounds, models, folders):
     lead = moderator_for(db, sid, models)
     async def phase(stage, agent, prompt, *, ballot=False, schema=None):
@@ -371,7 +371,7 @@ async def discuss(db, sid, topic, rounds, models, folders):
                           ballot=ballot, schema=schema)
 
     async def ask_seats(stage, prompt, ballot=False):
-        replies = await asyncio.gather(*(phase(stage, a, prompt, ballot=ballot) for a in models))
+        replies = await asyncio.gather(*(phase(stage, a, prompt[a] if isinstance(prompt, dict) else prompt, ballot=ballot) for a in models))
         if None in replies:
             raise ValueError(f"{stage} 未收齐全部席位回复，已保存现有记录")
         if not ballot:
@@ -381,16 +381,24 @@ async def discuss(db, sid, topic, rounds, models, folders):
 
     base = f"{GUIDE}\n用户议题及已提供背景：\n{topic}\n"
     proposals = await ask_seats("独立提案", base + "独立给出你的方案和最大不确定性。科研题写可证伪假设、最小实验和基线；"
-                           "开发题写交付和验收。按任务规模控制篇幅，通常在 350 字内。")
+                           "开发题写交付和验收。按任务规模控制篇幅，通常在 350 字内。正文不要署名或声明模型身份。")
     drafts = bundle(proposals)
-    reviews = await ask_seats("交叉评议", cross_review_prompt(base, proposals))
-    source = base + "\n提案：\n" + drafts + "\n交叉评议：\n" + bundle(reviews)
+    focuses = ("可证伪性、基线与已有证据", "可行性、实施验收与资源", "替代解释、边界与隐含依赖")
+    reviews = await ask_seats("交叉评议", {
+        agent: review_prompt(base, proposals, sid, agent, focus)
+        for agent, focus in zip(models, focuses)
+    })
+    findings = [item for agent, text in reviews.items() for item in (review_items(agent, text) or [])]
+    source = (base + "\n提案：\n" + drafts + "\n交叉评议：\n" + bundle(reviews) +
+              "\n带证据编号的评议（评议者报告，未由圆桌独立核实）：\n" + json.dumps(findings, ensure_ascii=False))
     revision = ""
     for version in range(1, rounds + 1):
         candidate = await phase(f"候选方案 v{version}", lead, source + revision +
                           "\n拟定一份可独立使用的方案，写清取舍、待验证假设、最小下一步、分工和可检查的验收条件。"
                           "科研议题写出能否定假设的结果。小任务保持简短，将实现细节留给负责人。保留真正未解决的选择。"
                           f"参与者为 {', '.join(models)}。输出 plan 和按依赖排序的 tasks，每项含 owner、task、acceptance。"
+                          "用 dispositions 数组逐项处理有编号的阻塞发现，每项含 id 和 response，写清取舍或待验证条件。"
+                          "没有编号可用空数组。处理意见与实验结果分开。"
                           + ("在 Windows 原生部署下，实施任务请分给 Codex 或 Gemini。\n" if os.name == "nt" else "") +
                           "按题目分工，后端、算法优先 Codex，前端和交互优先 Gemini；小事可只派一席。"
                           "开发任务分别写明负责的目录或文件、共享接口的唯一负责人和可运行的验收命令。"
@@ -401,16 +409,18 @@ async def discuss(db, sid, topic, rounds, models, folders):
         if candidate is None:
             raise ValueError("候选方案生成失败")
         plan, tasks = read_plan(candidate, models)
+        responses = json.loads(candidate).get("dispositions", [])
+        review_response = "\n主持人逐项回应（不是验证结果）：\n" + json.dumps(responses, ensure_ascii=False)
         db.execute("UPDATE sessions SET plan=?,assignments=? WHERE id=?", (plan, json.dumps(tasks, ensure_ascii=False), sid))
         print(f"\n候选方案 v{version}\n{plan}\n", flush=True)
         votes = await ask_seats(f"表决 v{version}", source + "\n请就下列这份候选方案独立表决。"
                            "可接受以验证假设为下一步的计划。复用已有实测结果，仅为影响结论的证据缺口补测。实质阻碍才反对，指出最小修订。"
-                           '只输出 JSON {"vote":"accept 或 object","reason":"明确理由"}。\n候选方案：\n' + plan, True)
+                           '只输出 JSON {"vote":"accept 或 object","reason":"明确理由"}。\n候选方案：\n' + plan + review_response, True)
         for agent, vote in votes.items():
             print(f"  {agent}  {vote}", flush=True)
         decision = ballot_result(votes, models)
         if decision == "consensus":
-            await write_final(db, sid, source, plan, votes, models["gemini"], folders["gemini"])
+            await write_final(db, sid, source + review_response, plan, votes, models["gemini"], folders["gemini"])
             return decision
         if decision == "incomplete":
             print("有表决缺少有效的选项或理由。原始回复已保存。", file=sys.stderr)
@@ -474,6 +484,8 @@ async def resume_discussion(db, sid, project, rounds=None):
     if mode is None and "独立提案" not in stages:
         raise ValueError("此旧记录未保存续跑所需的席位信息")
     drafting_only = row["state"] == "consensus"
+    if not drafting_only and settings.get("input_change"):
+        raise ValueError("工作输入已变更，请开始关联讨论")
     if drafting_only:
         last = db.execute("SELECT error FROM calls WHERE session=? AND stage='最终方案撰写' ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
         if not last or not last["error"]:
@@ -497,7 +509,9 @@ async def resume_discussion(db, sid, project, rounds=None):
         reviews = dict(db.execute("SELECT agent,reply FROM calls WHERE session=? AND stage='交叉评议' AND error IS NULL AND ended IS NOT NULL ORDER BY id",(sid,)))
         try:
             with tempfile.TemporaryDirectory(prefix="roundtable-draft-") as folder:
-                await write_final(db,sid,context+"\n交叉评议：\n"+bundle(reviews),row["plan"],votes,models["gemini"],Path(folder))
+                await write_final(db, sid, context + "\n交叉评议：\n" + bundle(reviews) +
+                                  "\n本版的证据和主持人回应：\n" + json.dumps(discussion_review(db, sid), ensure_ascii=False),
+                                  row["plan"], votes, models["gemini"], Path(folder))
         finally:
             finish(db,sid,"consensus")
         return sid
@@ -536,7 +550,28 @@ async def run_topic(db, sid, context, models, agent, rounds, probe, require_all=
             with tempfile.TemporaryDirectory(prefix="roundtable-lab-") as tmp:
                 folders = {a: Path(tmp) / a for a in seats}
                 first, *others = folders.values()
-                research_copy(source, first)
+                try:
+                    research_copy(source, first)
+                except ValueError:
+                    if not agent and require_all and source and not source.is_dir():
+                        settings["input_change"] = {"reason": "unavailable"}
+                        db.execute("UPDATE sessions SET settings=? WHERE id=?", (json.dumps(settings), sid))
+                        raise ValueError("原工作目录不可用，请重新绑定后开始关联讨论") from None
+                    raise
+                if not agent:
+                    fingerprint = input_fingerprint(first)
+                    saved = settings.get("input_fingerprint")
+                    if saved is None and source and require_all:
+                        settings["input_change"] = {"reason": "missing_baseline"}
+                    elif saved is not None and saved != fingerprint:
+                        changed = sorted(path for path in saved.keys() | fingerprint.keys()
+                                         if saved.get(path) != fingerprint.get(path))
+                        settings["input_change"] = {"reason": "changed", "paths": changed[:12], "count": len(changed)}
+                    else:
+                        settings["input_fingerprint"] = fingerprint
+                    db.execute("UPDATE sessions SET settings=? WHERE id=?", (json.dumps(settings), sid))
+                    if settings.get("input_change"):
+                        raise ValueError("工作输入已变更，请开始关联讨论")
                 for target in others:
                     shutil.copytree(first, target)
                 if agent:
@@ -560,7 +595,7 @@ REPORT_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["
                  "properties": {"status": {"type": "string", "enum": ["done", "blocked"]}, "report": {"type": "string"}}}
 
 
-async def implement(db, sid, destination=None, project=DEFAULT):
+async def implement(db, sid, destination=None, project=DEFAULT, *, preview=False):
     row = session(db, sid, project)
     if row["state"] != "consensus":
         raise ValueError(f"当前状态为「{LABEL[row['state']]}」。实施需要全席共识。")
@@ -578,14 +613,18 @@ async def implement(db, sid, destination=None, project=DEFAULT):
         if not settings["claude_enabled"]:
             raise ValueError("此方案需要 Claude，请先为当前项目启用 Claude")
         await asyncio.to_thread(check_claude)
+    saved = json.loads(row["settings"] or "{}")
+    saved["implementation_preview"] = preview
+    patch = discussion_folder(project, sid) / PATCH_NAME
+    execution_dir = implementation_preview(target, patch) if preview else nullcontext(target)
     db.execute("BEGIN IMMEDIATE")
     try:
         for other in db.execute("SELECT id,workspace FROM sessions WHERE state='implementing'"):
             path = Path(other["workspace"]).resolve()
             if target == path or path in target.parents or target in path.parents:
                 raise ValueError(f"目录正在被讨论 {other['id']} 实施，请在它结束后重试")
-        changed = db.execute("UPDATE sessions SET state='implementing',workspace=?,owner=? WHERE id=? AND state='consensus' AND trash_root IS NULL AND project IN (SELECT name FROM projects WHERE trashed=0)",
-                             (str(target), os.getpid(), sid)).rowcount
+        changed = db.execute("UPDATE sessions SET state='implementing',workspace=?,owner=?,settings=? WHERE id=? AND state='consensus' AND trash_root IS NULL AND project IN (SELECT name FROM projects WHERE trashed=0)",
+                             (str(target), os.getpid(), json.dumps(saved), sid)).rowcount
         if not changed:
             raise ValueError(f"当前状态为「{LABEL[row['state']]}」。只有已达成共识且尚未派发的方案可执行。")
         db.commit()
@@ -593,43 +632,58 @@ async def implement(db, sid, destination=None, project=DEFAULT):
         db.rollback()
         raise
     state = "inspect"
+    started = False
+    restore = False
     try:
-        prompt = (f"本次实施共用的目标目录为 {target}。当前工作目录已设为该目录。\n"
-                  "在此目录落实下方用户任务和已同意的方案。遵守项目约定，保留已有改动。"
-                  "运行相关验收并报告实际结果、改动和未完成项。不要发布、推送、启动其他模型或联系第三方。\n"
-                  + "先前讨论背景：\n" + history(db, row["parent"], project) + "\n本轮用户要求：\n" + row["topic"] + "\n已表决的方案：\n" + row["plan"])
-        print(f"实施目录  {target}")
-        reports = []
-        steps = [("实施", task) for task in tasks]
-        if reviewer:
-            steps.append(("集成复核", {"owner": reviewer, "task": "只读核对目标目录的实际产物、接口和各项验收证据。可运行只读核验命令，勿修改文件。", "acceptance": "逐项列明复核结果和可复现依据。缺失产物、接口不符或无法核实关键验收条件时返回 blocked。"}))
-        for stage, task in steps:
-            owner = task["owner"]
-            handoff = ("\n仅实施本项：" + task["task"] + "\n验收条件：" + task["acceptance"] +
-                       "\n先前交接：" + "\n".join(reports)[-16000:] +
-                       "\n若任务未能完成，请将结果标为 blocked，说明原因。")
-            answer = await call(db, sid, stage, owner, prompt + handoff, models[owner], workspace=target,
-                                schema=REPORT_SCHEMA)
-            if not answer:
-                break
-            try:
-                result = json.loads(answer)
-            except ValueError:
-                result = None
-            if not isinstance(result, dict) or not isinstance(result.get("report"), str) or not result["report"].strip():
-                db.execute("UPDATE sessions SET failure=? WHERE id=?", (f"{owner} 缺少有效实施报告", sid))
-                break
-            if result.get("status") != "done":
-                db.execute("UPDATE sessions SET failure=? WHERE id=?", (f"{owner} 未完成任务：{result['report']}", sid))
-                break
-            reports.append(owner + "：" + result["report"])
-            print("\n" + reports[-1])
-        else:
-            state = "returned"
+        with execution_dir as execution:
+            started = True
+            prompt = (f"本次实施共用的目标目录为 {execution}。当前工作目录已设为该目录。\n"
+                      "在此目录落实下方用户任务和已同意的方案。遵守项目约定，保留已有改动。"
+                      "运行相关验收并报告实际结果、改动和未完成项。不要发布、推送、启动其他模型或联系第三方。\n"
+                      + "先前讨论背景：\n" + history(db, row["parent"], project) + "\n本轮用户要求：\n" + row["topic"] + "\n已表决的方案：\n" + row["plan"])
+            if preview:
+                prompt += "\n本次是隔离预览，所有改动只能写入当前工作目录。"
+            print(f"实施目录  {execution}")
+            reports = []
+            steps = [("实施", task) for task in tasks]
+            if reviewer:
+                steps.append(("集成复核", {"owner": reviewer, "task": "只读核对目标目录的实际产物、接口和各项验收证据。可运行只读核验命令，勿修改文件。", "acceptance": "逐项列明复核结果和可复现依据。缺失产物、接口不符或无法核实关键验收条件时返回 blocked。"}))
+            for stage, task in steps:
+                owner = task["owner"]
+                handoff = ("\n仅实施本项：" + task["task"] + "\n验收条件：" + task["acceptance"] +
+                           "\n先前交接：" + "\n".join(reports)[-16000:] +
+                           "\n若任务未能完成，请将结果标为 blocked，说明原因。")
+                answer = await call(db, sid, stage, owner, prompt + handoff, models[owner], workspace=execution,
+                                    schema=REPORT_SCHEMA)
+                if not answer:
+                    break
+                try:
+                    result = json.loads(answer)
+                except ValueError:
+                    result = None
+                if not isinstance(result, dict) or not isinstance(result.get("report"), str) or not result["report"].strip():
+                    db.execute("UPDATE sessions SET failure=? WHERE id=?", (f"{owner} 缺少有效实施报告", sid))
+                    break
+                if result.get("status") != "done":
+                    db.execute("UPDATE sessions SET failure=? WHERE id=?", (f"{owner} 未完成任务：{result['report']}", sid))
+                    break
+                reports.append(owner + "：" + result["report"])
+                print("\n" + reports[-1])
+            else:
+                state = "returned"
+    except (ValueError, OSError) as exc:
+        if not started:
+            restore = db.execute("""UPDATE sessions SET state='consensus',workspace=NULL,owner=NULL,settings=?
+                                    WHERE id=? AND state='implementing' AND stop_requested=0""",
+                                 (row["settings"], sid)).rowcount > 0
+            raise
+        db.execute("UPDATE sessions SET failure=? WHERE id=?", (str(exc), sid))
+        state = "inspect"
     finally:
-        state = finish(db, sid, state)
-        print(LABEL[state])
-        session_usage(db, sid)
+        if not restore:
+            state = finish(db, sid, state)
+            print(LABEL[state])
+            session_usage(db, sid)
     return state
 
 
@@ -697,6 +751,14 @@ def recent(db, project=DEFAULT):
         print(f"{row['id']}  {LABEL[row['state']]}  {row['topic'].splitlines()[0][:70]}")
 
 
+def discussion_review(db, sid, calls=None, settings=None):
+    if calls is None:
+        calls = db.execute("SELECT * FROM calls WHERE session=? ORDER BY id", (sid,))
+    if settings is None:
+        settings = json.loads(db.execute("SELECT settings FROM sessions WHERE id=?", (sid,)).fetchone()[0] or "{}")
+    return review_state(calls, settings.get("models") or MODEL_SEATS)
+
+
 def transcript(db, sid, project):
     row = session(db, sid, project)
     def clock(epoch):
@@ -704,10 +766,20 @@ def transcript(db, sid, project):
     sections = [f"# {project} · 圆桌讨论记录", f"编号 `{sid}` · {LABEL[row['state']]} · {clock(row['started'])}",
                 "## 用户议题", row["topic"]]
     for label, value in [("接续自", row["parent"]), ("实施目录", row["workspace"]), ("异常", row["failure"]),
-                         ("席位说明", json.loads(row["settings"] or "{}").get("notice"))]:
+                         ("席位说明", json.loads(row["settings"] or "{}").get("notice")),
+                         ("实施预览补丁", PATCH_NAME if (discussion_folder(project, sid) / PATCH_NAME).is_file() else None)]:
         if value:
             sections.append(f"{label} · {value}")
-    for i, c in enumerate(db.execute("SELECT * FROM calls WHERE session=? ORDER BY id", (sid,)), 1):
+    calls = list(db.execute("SELECT * FROM calls WHERE session=? ORDER BY id", (sid,)))
+    review = discussion_review(db, sid, calls, json.loads(row["settings"] or "{}"))
+    if review and review["items"]:
+        sections.append("## 评议证据（由评议者报告）")
+        for item in review["items"]:
+            sections.append(f"- {item['id']} · {item['agent']} · " + ("阻塞项 · " if item["blocking"] else "") + item["claim"])
+            for label, key in (("来源", "source"), ("验证", "check"), ("主持人回应", "response")):
+                if item.get(key):
+                    sections.append(f"  - {label} · {item[key]}")
+    for i, c in enumerate(calls, 1):
         sections.extend([f"## {i}. {c['stage']} · {c['agent']}",
                          " · ".join(filter(None, (c["model"] or "CLI 默认", c["effort"], clock(c["started"]),
                                                   clock(c["ended"]), amount(json.loads(c["usage"] or "{}")))))])
